@@ -1,15 +1,16 @@
 --[[
-	R4N DEX v1.0 — remake de Dex Explorer
-	Explorer virtualizado · Propiedades editables · Visor/decompilador de scripts
-	Remote Spy · Consola · Herramientas · UI movible/redimensionable (PC y móvil)
-	Tecla: RightShift = mostrar/ocultar
+	R4N DEX v1.1 — remake de Dex Explorer (estilo clásico gris oscuro)
+	Ventanas: Explorer · Properties · Script Viewer · Remote Spy · Console · Tools
+	Visor de scripts renovado: varios métodos de obtención + resaltado de sintaxis + scroll virtual
+	Click derecho en el Explorer = menú contextual · Doble click en un script = abrirlo
+	Tecla: RightShift = mostrar/ocultar todo
 ]]
 
 local cloneref = cloneref or function(o) return o end
 local function S(n) return cloneref(game:GetService(n)) end
 
-local Players, UIS, RunService, CoreGui, LogService, CollectionService =
-	S("Players"), S("UserInputService"), S("RunService"), S("CoreGui"), S("LogService"), S("CollectionService")
+local Players, UIS, RunService, CoreGui, LogService, CollectionService, TextService =
+	S("Players"), S("UserInputService"), S("RunService"), S("CoreGui"), S("LogService"), S("CollectionService"), S("TextService")
 local Workspace = S("Workspace")
 local LP = Players.LocalPlayer
 local env = (getgenv or function() return _G end)()
@@ -27,13 +28,23 @@ local function connect(sig, fn)
 	return c
 end
 
+-- paleta del Dex clásico
 local C = {
-	bg = Color3.fromRGB(17, 17, 24), panel = Color3.fromRGB(24, 24, 34), panel2 = Color3.fromRGB(34, 34, 48),
-	line = Color3.fromRGB(52, 52, 72), text = Color3.fromRGB(232, 232, 242), dim = Color3.fromRGB(142, 142, 166),
-	accent = Color3.fromRGB(124, 92, 255), accent2 = Color3.fromRGB(86, 182, 255),
-	good = Color3.fromRGB(80, 214, 140), bad = Color3.fromRGB(255, 96, 110), warn = Color3.fromRGB(255, 196, 82),
+	bg = Color3.fromRGB(36, 36, 36),      -- fondo de listas
+	panel = Color3.fromRGB(45, 45, 45),   -- fondo de ventanas
+	title = Color3.fromRGB(52, 52, 52),   -- barras de título / cabeceras
+	btn = Color3.fromRGB(60, 60, 60),
+	hover = Color3.fromRGB(75, 75, 75),
+	line = Color3.fromRGB(33, 33, 33),
+	sel = Color3.fromRGB(11, 90, 175),    -- selección azul
+	text = Color3.fromRGB(255, 255, 255),
+	dim = Color3.fromRGB(165, 165, 165),
+	accent = Color3.fromRGB(11, 90, 175),
+	accent2 = Color3.fromRGB(110, 180, 255),
+	good = Color3.fromRGB(90, 205, 130), bad = Color3.fromRGB(235, 80, 80), warn = Color3.fromRGB(255, 198, 0),
+	scroll = Color3.fromRGB(110, 110, 110),
 }
-local FONT, FONTB, MONO = Enum.Font.Gotham, Enum.Font.GothamMedium, Enum.Font.Code
+local FONT, FONTB, MONO = Enum.Font.SourceSans, Enum.Font.SourceSansBold, Enum.Font.Code
 
 local function getGuiParent()
 	if gethui then
@@ -54,7 +65,6 @@ local function new(class, props, parent)
 	o.Parent = parent
 	return o
 end
-local function corner(o, r) return new("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o) end
 local function stroke(o, col) return new("UIStroke", { Color = col or C.line, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, o) end
 local function padding(o, l, t, r, b)
 	return new("UIPadding", {
@@ -64,23 +74,23 @@ local function padding(o, l, t, r, b)
 end
 local function text(parent, str, props)
 	local p = {
-		Text = str, BackgroundTransparency = 1, TextColor3 = C.text, Font = FONT, TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 1, 0),
+		Text = str, BackgroundTransparency = 1, TextColor3 = C.text, Font = FONT, TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 1, 0), BorderSizePixel = 0,
 	}
 	for k, v in pairs(props or {}) do p[k] = v end
 	return new("TextLabel", p, parent)
 end
 local function button(parent, str, cb, props)
 	local p = {
-		Text = str, BackgroundColor3 = C.panel2, TextColor3 = C.text, Font = FONTB, TextSize = 12,
+		Text = str, BackgroundColor3 = C.btn, TextColor3 = C.text, Font = FONT, TextSize = 14,
 		AutoButtonColor = false, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BorderSizePixel = 0,
 	}
 	for k, v in pairs(props or {}) do p[k] = v end
 	local b = new("TextButton", p, parent)
-	corner(b, 5)
-	padding(b, 9, 0, 9, 0)
+	stroke(b, C.line)
+	padding(b, 8, 0, 8, 0)
 	b:SetAttribute("base", b.BackgroundColor3)
-	b.MouseEnter:Connect(function() b.BackgroundColor3 = b:GetAttribute("base"):Lerp(C.accent, 0.35) end)
+	b.MouseEnter:Connect(function() b.BackgroundColor3 = C.hover end)
 	b.MouseLeave:Connect(function() b.BackgroundColor3 = b:GetAttribute("base") end)
 	if cb then b.Activated:Connect(cb) end
 	return b
@@ -93,14 +103,21 @@ local function hlist(parent, pad)
 end
 local function vscroll(parent, props)
 	local p = {
-		BackgroundColor3 = C.panel, BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageColor3 = C.accent,
+		BackgroundColor3 = C.bg, BorderSizePixel = 0, ScrollBarThickness = 8, ScrollBarImageColor3 = C.scroll,
 		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
 	}
 	for k, v in pairs(props or {}) do p[k] = v end
 	local s = new("ScrollingFrame", p, parent)
-	corner(s, 6)
-	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 1) }, s)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 0) }, s)
 	return s
+end
+local function toolbar(parent, y)
+	local f = new("ScrollingFrame", {
+		Position = UDim2.fromOffset(4, y or 4), Size = UDim2.new(1, -8, 0, 22), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X,
+	}, parent)
+	hlist(f, 3)
+	return f
 end
 
 -- formateo / serialización ---------------------------------------------------
@@ -212,7 +229,7 @@ local function copy(str)
 end
 
 ----------------------------------------------------------------
--- Ventana
+-- Sistema de ventanas (como el Dex original: ventanas independientes)
 ----------------------------------------------------------------
 local gui = new("ScreenGui", {
 	Name = "R4NDex", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -221,37 +238,22 @@ local gui = new("ScreenGui", {
 
 local cam = Workspace.CurrentCamera
 local vp = cam and cam.ViewportSize or Vector2.new(1000, 600)
-local W, H = math.min(780, vp.X - 16), math.min(470, vp.Y - 16)
-local main = new("Frame", {
-	Size = UDim2.fromOffset(W, H), Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2),
-	BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true,
-}, gui)
-corner(main, 10)
-stroke(main)
+local topZ = 1
+local windows = {}
+local minimized = false
 
-local titleBar = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, main)
-text(titleBar, "◆ R4N DEX", { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(0.5, 0, 1, 0), Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.accent })
-local ctl = new("Frame", { Size = UDim2.new(0, 70, 1, -8), Position = UDim2.new(1, -76, 0, 4), BackgroundTransparency = 1 }, titleBar)
-hlist(ctl, 4)
-
-local body = new("Frame", { Position = UDim2.fromOffset(6, 36), Size = UDim2.new(1, -12, 1, -66), BackgroundTransparency = 1 }, main)
-local statusBar = new("Frame", { Position = UDim2.new(0, 0, 1, -24), Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, main)
-local statusLbl = text(statusBar, "Listo.", { Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -40, 1, 0), TextColor3 = C.dim, TextSize = 11 })
-
-local notifyTok = 0
-local function notify(msg, kind)
-	notifyTok += 1
-	local my = notifyTok
-	statusLbl.Text = msg
-	statusLbl.TextColor3 = kind == "good" and C.good or kind == "bad" and C.bad or kind == "warn" and C.warn or C.text
-	task.delay(4, function()
-		if my == notifyTok and alive then statusLbl.TextColor3 = C.dim end
-	end)
+local function isPress(i)
+	return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
+end
+local function pointer(i)
+	local ok, p = pcall(function() return UIS:GetMouseLocation() end)
+	if ok and p then return p end
+	return Vector2.new(i.Position.X, i.Position.Y)
 end
 
 local function makeDraggable(handle, onStart, onDelta)
 	handle.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		if isPress(input) then
 			local start = input.Position
 			local state = onStart()
 			local con
@@ -266,74 +268,114 @@ local function makeDraggable(handle, onStart, onDelta)
 		end
 	end)
 end
-makeDraggable(titleBar, function() return main.Position end, function(sp, dx, dy)
-	main.Position = UDim2.new(sp.X.Scale, sp.X.Offset + dx, sp.Y.Scale, sp.Y.Offset + dy)
-end)
 
-local grip = new("TextLabel", { Text = "◢", TextColor3 = C.dim, BackgroundTransparency = 1, Size = UDim2.fromOffset(18, 18), Position = UDim2.new(1, -18, 1, -22), ZIndex = 5, TextSize = 14 }, main)
-makeDraggable(grip, function() return main.AbsoluteSize end, function(sz, dx, dy)
-	main.Size = UDim2.fromOffset(math.max(520, sz.X + dx), math.max(320, sz.Y + dy))
-end)
+local function addWindow(key, title, x, y, w, h, minW, minH)
+	local f = new("Frame", {
+		Name = key, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h), BackgroundColor3 = C.panel,
+		BorderSizePixel = 0, ClipsDescendants = true, Visible = false, Active = true,
+	}, gui)
+	stroke(f, C.line)
+	local bar = new("Frame", { Size = UDim2.new(1, 0, 0, 22), BackgroundColor3 = C.title, BorderSizePixel = 0 }, f)
+	new("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BackgroundColor3 = C.line, BorderSizePixel = 0 }, bar)
+	local ttl = text(bar, title, { Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -32, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
+	local cl = new("TextButton", {
+		Text = "✕", Size = UDim2.fromOffset(22, 22), Position = UDim2.new(1, -22, 0, 0), BackgroundTransparency = 1,
+		TextColor3 = C.dim, Font = FONT, TextSize = 13, AutoButtonColor = false, BorderSizePixel = 0,
+	}, bar)
+	cl.MouseEnter:Connect(function() cl.BackgroundTransparency = 0 cl.BackgroundColor3 = C.bad cl.TextColor3 = C.text end)
+	cl.MouseLeave:Connect(function() cl.BackgroundTransparency = 1 cl.TextColor3 = C.dim end)
+	cl.Activated:Connect(function() f.Visible = false end)
 
-local minimized, prevSize = false, nil
-button(ctl, "–", function()
-	minimized = not minimized
-	if minimized then prevSize = main.Size; body.Visible = false; statusBar.Visible = false; grip.Visible = false
-		main.Size = UDim2.fromOffset(main.AbsoluteSize.X, 30)
-	else main.Size = prevSize; body.Visible = true; statusBar.Visible = true; grip.Visible = true end
-end, { Size = UDim2.fromOffset(30, 22), AutomaticSize = Enum.AutomaticSize.None })
-local closeBtn = button(ctl, "✕", nil, { Size = UDim2.fromOffset(30, 22), AutomaticSize = Enum.AutomaticSize.None, BackgroundColor3 = Color3.fromRGB(120, 40, 55) })
-closeBtn:SetAttribute("base", Color3.fromRGB(120, 40, 55))
+	local content = new("Frame", { Position = UDim2.fromOffset(0, 22), Size = UDim2.new(1, 0, 1, -22), BackgroundTransparency = 1, ClipsDescendants = true }, f)
+
+	makeDraggable(bar, function() return f.Position end, function(sp, dx, dy)
+		f.Position = UDim2.new(sp.X.Scale, sp.X.Offset + dx, sp.Y.Scale, sp.Y.Offset + dy)
+	end)
+	local grip = new("TextButton", {
+		Text = "◢", TextColor3 = C.dim, BackgroundTransparency = 1, Size = UDim2.fromOffset(16, 16), Position = UDim2.new(1, -16, 1, -16),
+		ZIndex = 50, TextSize = 12, Font = FONT, AutoButtonColor = false,
+	}, f)
+	makeDraggable(grip, function() return f.AbsoluteSize end, function(sz, dx, dy)
+		f.Size = UDim2.fromOffset(math.max(minW or 240, sz.X + dx), math.max(minH or 160, sz.Y + dy))
+	end)
+
+	windows[key] = { frame = f, content = content, title = ttl }
+	return content
+end
+
+local function showTab(name)
+	local w = windows[name]
+	if not w then return end
+	w.frame.Visible = true
+	topZ += 1
+	w.frame.ZIndex = topZ
+end
+
+-- geometría por defecto (se adapta a PC y móvil)
+local wide = vp.X >= 700
+local PW = wide and 320 or (vp.X - 16)
+local PX = vp.X - PW - 8
+local TOP = 34
+local EH = math.max(180, math.floor((vp.Y - TOP - 14) * 0.5))
+local SW = wide and math.min(620, PX - 16) or (vp.X - 16)
+local SH = math.min(420, vp.Y - TOP - 8)
 
 ----------------------------------------------------------------
--- Paneles
+-- Explorer
 ----------------------------------------------------------------
-local left = new("Frame", { Size = UDim2.new(0.46, -3, 1, 0), BackgroundTransparency = 1 }, body)
-local right = new("Frame", { Position = UDim2.new(0.46, 3, 0, 0), Size = UDim2.new(0.54, -3, 1, 0), BackgroundTransparency = 1 }, body)
+local ex = addWindow("Explorer", "Explorer", PX, TOP, PW, EH, 240, 200)
 
--- Explorer ---------------------------------------------------------------------
 local searchBox = new("TextBox", {
-	Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.panel, TextColor3 = C.text, PlaceholderText = "🔍 Buscar nombre  (c:Clase para buscar por clase)",
-	PlaceholderColor3 = C.dim, Text = "", Font = FONT, TextSize = 12, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
-}, left)
-corner(searchBox, 6)
-padding(searchBox, 8, 0, 8, 0)
+	Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 0, 22), BackgroundColor3 = C.btn, TextColor3 = C.text,
+	PlaceholderText = "Filter workspace  (c:Clase para buscar por clase)", PlaceholderColor3 = Color3.fromRGB(110, 110, 110),
+	Text = "", Font = FONT, TextSize = 14, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
+}, ex)
+stroke(searchBox, C.line)
+padding(searchBox, 6, 0, 6, 0)
 
-local rootStrip = new("ScrollingFrame", {
-	Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, BorderSizePixel = 0,
-	ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X,
-}, left)
-hlist(rootStrip, 4)
+local rootStrip = new("Frame", { Position = UDim2.fromOffset(4, 30), Size = UDim2.new(1, -8, 0, 20), BackgroundTransparency = 1 }, ex)
+hlist(rootStrip, 3)
 
 local list = new("ScrollingFrame", {
-	Position = UDim2.fromOffset(0, 58), Size = UDim2.new(1, 0, 1, -58 - 30), BackgroundColor3 = C.panel, BorderSizePixel = 0,
-	ScrollBarThickness = 5, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
-}, left)
-corner(list, 6)
+	Position = UDim2.fromOffset(4, 54), Size = UDim2.new(1, -8, 1, -54 - 48), BackgroundColor3 = C.bg, BorderSizePixel = 0,
+	ScrollBarThickness = 8, ScrollBarImageColor3 = C.scroll, CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+}, ex)
+stroke(list, C.line)
 
-local actionStrip = new("ScrollingFrame", {
-	Position = UDim2.new(0, 0, 1, -26), Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, BorderSizePixel = 0,
-	ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X,
-}, left)
-hlist(actionStrip, 4)
+local actionStrip = toolbar(ex, 0)
+actionStrip.Position = UDim2.new(0, 4, 1, -46)
 
-local ROW = 22
+local statusLbl = text(ex, "Listo.", { Position = UDim2.new(0, 6, 1, -20), Size = UDim2.new(1, -26, 0, 18), TextColor3 = C.dim, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd })
+
+local notifyTok = 0
+local function notify(msg, kind)
+	notifyTok += 1
+	local my = notifyTok
+	statusLbl.Text = msg
+	statusLbl.TextColor3 = kind == "good" and C.good or kind == "bad" and C.bad or kind == "warn" and C.warn or C.text
+	task.delay(4, function()
+		if my == notifyTok and alive then statusLbl.TextColor3 = C.dim end
+	end)
+end
+
+local ROW = 20
 local flat, expanded, selected = {}, {}, nil
 local searchText = ""
 local rows = {}
-local render, rebuild, selectInst, buildProps, loadScript, showTab, reveal, setRoot
+local render, rebuild, selectInst, buildProps, loadScript, reveal, setRoot, openMenu
 
 local roots = {
 	{ "game", function() return game:GetChildren() end },
-	{ "Workspace", function() return { Workspace } end },
-	{ "Players", function() return { Players } end },
-	{ "ReplicatedStorage", function() return { S("ReplicatedStorage") } end },
-	{ "Lighting", function() return { S("Lighting") } end },
 	{ "nil", function() return getnilinstances and getnilinstances() or {} end },
 	{ "Scripts", function()
-		local t = {}
-		if getscripts then for _, s in ipairs(getscripts()) do t[#t + 1] = s end end
-		if getloadedmodules then for _, s in ipairs(getloadedmodules()) do t[#t + 1] = s end end
+		local t, seen = {}, {}
+		local function addAll(arr)
+			for _, s in ipairs(arr) do
+				if not seen[s] then seen[s] = true t[#t + 1] = s end
+			end
+		end
+		if getscripts then pcall(function() addAll(getscripts()) end) end
+		if getloadedmodules then pcall(function() addAll(getloadedmodules()) end) end
 		return t
 	end },
 }
@@ -352,11 +394,11 @@ local BADGES = {
 	{ "Attachment", "a", Color3.fromRGB(150, 150, 170) }, { "Player", "J", Color3.fromRGB(86, 182, 255) },
 }
 local function badgeFor(inst)
-	if inst.Parent == game then return "◈", C.accent end
+	if inst.Parent == game then return "◈", Color3.fromRGB(110, 150, 220) end
 	for _, b in ipairs(BADGES) do
 		if inst:IsA(b[1]) then return b[2], b[3] end
 	end
-	return inst.ClassName:sub(1, 1), Color3.fromRGB(90, 90, 112)
+	return inst.ClassName:sub(1, 1), Color3.fromRGB(100, 100, 120)
 end
 
 local function kids(inst)
@@ -421,28 +463,50 @@ local function toggle(inst)
 	render()
 end
 
+local function paintRow(r)
+	if r.inst and r.inst == selected then
+		r.frame.BackgroundColor3, r.frame.BackgroundTransparency = C.sel, 0
+	elseif r.hover then
+		r.frame.BackgroundColor3, r.frame.BackgroundTransparency = C.hover, 0
+	else
+		r.frame.BackgroundTransparency = 1
+	end
+end
+
 local function makeRow()
 	local row = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, ROW), BackgroundColor3 = C.accent, BackgroundTransparency = 1, Text = "",
+		Size = UDim2.new(1, 0, 0, ROW), BackgroundColor3 = C.sel, BackgroundTransparency = 1, Text = "",
 		AutoButtonColor = false, BorderSizePixel = 0, Visible = false,
 	}, list)
-	local arrow = new("TextButton", { Size = UDim2.fromOffset(16, ROW), BackgroundTransparency = 1, Text = "", TextColor3 = C.dim, Font = FONTB, TextSize = 11, AutoButtonColor = false }, row)
-	local badge = new("TextLabel", { Size = UDim2.fromOffset(16, 16), BackgroundColor3 = C.dim, Text = "", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 10 }, row)
-	corner(badge, 4)
+	local arrow = new("TextButton", { Size = UDim2.fromOffset(16, ROW), BackgroundTransparency = 1, Text = "", TextColor3 = C.dim, Font = FONT, TextSize = 14, AutoButtonColor = false }, row)
+	local badge = new("TextLabel", { Size = UDim2.fromOffset(14, 14), BackgroundColor3 = C.dim, Text = "", TextColor3 = Color3.new(1, 1, 1), Font = FONTB, TextSize = 12, BorderSizePixel = 0 }, row)
 	local name = text(row, "", { TextTruncate = Enum.TextTruncate.AtEnd })
-	local cls = text(row, "", { TextColor3 = C.dim, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Right, Position = UDim2.new(1, -84, 0, 0), Size = UDim2.new(0, 80, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
-	local r = { frame = row, arrow = arrow, badge = badge, name = name, cls = cls, inst = nil }
+	local r = { frame = row, arrow = arrow, badge = badge, name = name, inst = nil, hover = false }
+	row.MouseEnter:Connect(function() r.hover = true paintRow(r) end)
+	row.MouseLeave:Connect(function() r.hover = false paintRow(r) end)
 	row.Activated:Connect(function()
 		local inst = r.inst
 		if not inst then return end
 		local now = os.clock()
-		if lastClick.i == inst and now - lastClick.t < 0.4 then
-			lastClick.i = nil
-			toggle(inst)
-		else
-			lastClick.i, lastClick.t = inst, now
-		end
+		local dbl = lastClick.i == inst and now - lastClick.t < 0.4
+		lastClick.i, lastClick.t = inst, now
+		local scriptWasOpen = windows.Script.frame.Visible
 		selectInst(inst)
+		if dbl then
+			lastClick.i = nil
+			if inst:IsA("LuaSourceContainer") then
+				showTab("Script")
+				if not scriptWasOpen then loadScript(inst) end
+			else
+				toggle(inst)
+			end
+		end
+	end)
+	row.MouseButton2Click:Connect(function()
+		if r.inst then
+			selectInst(r.inst)
+			openMenu(r.inst)
+		end
 	end)
 	arrow.Activated:Connect(function() toggle(r.inst) end)
 	return r
@@ -451,7 +515,7 @@ end
 local function fillRow(r, item, y)
 	local inst, depth = item[1], item[2]
 	r.inst = inst
-	local x = 2 + depth * 14
+	local x = 4 + depth * 16
 	r.frame.Position = UDim2.fromOffset(0, y)
 	r.arrow.Position = UDim2.fromOffset(x, 0)
 	r.arrow.Text = hasKids(inst) and (expanded[inst] and "▾" or "▸") or ""
@@ -459,11 +523,10 @@ local function fillRow(r, item, y)
 	local letter, col = badgeFor(inst)
 	r.badge.Text, r.badge.BackgroundColor3 = letter, col
 	r.name.Position = UDim2.fromOffset(x + 38, 0)
-	r.name.Size = UDim2.new(1, -(x + 38 + 84), 1, 0)
+	r.name.Size = UDim2.new(1, -(x + 42), 1, 0)
 	r.name.Text = inst.Name
-	r.cls.Text = inst.ClassName
-	r.frame.BackgroundTransparency = (inst == selected) and 0.6 or 1
 	r.frame.Visible = true
+	paintRow(r)
 end
 
 render = function()
@@ -497,7 +560,7 @@ setRoot = function(r)
 	render()
 end
 for _, r in ipairs(roots) do
-	button(rootStrip, r[1], function() setRoot(r) end, { Size = UDim2.new(0, 0, 1, 0) })
+	button(rootStrip, r[1], function() setRoot(r) end, { TextSize = 13 })
 end
 
 local tok = 0
@@ -549,13 +612,16 @@ selectInst = function(inst)
 	buildProps(inst)
 	render()
 	if inst then notify(getPath(inst)) end
-	if inst and showTab and tabs and tabs.current == "Script" and inst:IsA("LuaSourceContainer") then loadScript(inst) end
+	if inst and windows.Script.frame.Visible and inst:IsA("LuaSourceContainer") then loadScript(inst) end
 end
 
 -- Acciones del explorer --------------------------------------------------------
 local function need()
 	if not selected then notify("Selecciona una instancia primero", "warn") return false end
 	return true
+end
+local function copyN(str, okMsg)
+	if copy(str) then notify(okMsg, "good") else notify("Tu executor no tiene setclipboard", "bad") end
 end
 local function tpTo(inst)
 	local char = LP.Character
@@ -579,67 +645,100 @@ local function unview()
 	local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
 	if h then Workspace.CurrentCamera.CameraSubject = h notify("Cámara restaurada", "good") end
 end
-
-button(actionStrip, "Ruta", function() if need() then notify(copy(getPath(selected)) and "Ruta copiada" or "Sin setclipboard", "good") end end)
-button(actionStrip, "Clonar", function()
-	if not need() then return end
-	local ok, c = pcall(function() return selected:Clone() end)
-	if ok and c then c.Parent = selected.Parent notify("Clonado", "good") else notify("No clonable", "bad") end
-end)
-button(actionStrip, "Borrar", function()
-	if not need() then return end
-	local ok = pcall(function() selected:Destroy() end)
-	notify(ok and "Eliminado" or "No se pudo borrar", ok and "good" or "bad")
-	selected = nil
-	buildProps(nil)
-	rebuild() render()
-end)
-button(actionStrip, "TP", function() if need() then tpTo(selected) end end)
-button(actionStrip, "Ver", function() if need() then viewInst(selected) end end)
-button(actionStrip, "Normal", unview)
-button(actionStrip, "Script", function()
-	if need() then showTab("Script") loadScript(selected) end
-end)
-button(actionStrip, "↻", function() rebuild() render() end)
-
-----------------------------------------------------------------
--- Pestañas (panel derecho)
-----------------------------------------------------------------
-local tabStrip = new("ScrollingFrame", {
-	Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 0,
-	CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X,
-}, right)
-hlist(tabStrip, 4)
-tabs = { current = nil }
-local function addTab(name)
-	local btn = button(tabStrip, name, function() showTab(name) end)
-	local frame = new("Frame", { Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, 0, 1, -30), BackgroundTransparency = 1, Visible = false }, right)
-	tabs[name] = { btn = btn, frame = frame }
-	return frame
+local function cloneInst(i)
+	local ok, c = pcall(function() return i:Clone() end)
+	if ok and c then c.Parent = i.Parent notify("Clonado", "good") rebuild() render() else notify("No clonable", "bad") end
 end
-showTab = function(name)
-	tabs.current = name
-	for k, t in pairs(tabs) do
-		if type(t) == "table" then
-			t.frame.Visible = (k == name)
-			local base = (k == name) and C.accent or C.panel2
-			t.btn:SetAttribute("base", base)
-			t.btn.BackgroundColor3 = base
+local function deleteInst(i)
+	local ok = pcall(function() i:Destroy() end)
+	notify(ok and "Eliminado" or "No se pudo borrar", ok and "good" or "bad")
+	if selected == i then selected = nil buildProps(nil) end
+	rebuild() render()
+end
+local function openScript(i)
+	showTab("Script")
+	loadScript(i)
+end
+
+local ACTIONS = {
+	{ "Copiar ruta", function(i) copyN(getPath(i), "Ruta copiada") end },
+	{ "Copiar nombre", function(i) copyN(i.Name, "Nombre copiado") end },
+	{ "Clonar", cloneInst },
+	{ "Borrar", deleteInst },
+	{ "Teletransportar", tpTo, when = function(i) return i:IsA("PVInstance") end },
+	{ "Ver con la cámara", viewInst, when = function(i) return i:IsA("PVInstance") or i:IsA("Humanoid") end },
+	{ "Ver script", openScript, when = function(i) return i:IsA("LuaSourceContainer") end },
+	{ "Ir al padre", function(i) if i.Parent then selectInst(i.Parent) reveal(i.Parent) end end, when = function(i) return i.Parent ~= nil end },
+	{ "Expandir / contraer", function(i) toggle(i) end },
+}
+
+-- menú contextual (click derecho) ----------------------------------------------
+local menu = new("Frame", {
+	Visible = false, BackgroundColor3 = C.title, BorderSizePixel = 0, Size = UDim2.fromOffset(170, 0),
+	AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 200000,
+}, gui)
+stroke(menu, C.line)
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, menu)
+
+openMenu = function(inst)
+	for _, c in ipairs(menu:GetChildren()) do
+		if c:IsA("TextButton") then c:Destroy() end
+	end
+	for k, a in ipairs(ACTIONS) do
+		if not a.when or a.when(inst) then
+			local b = new("TextButton", {
+				Size = UDim2.new(1, 0, 0, 22), BackgroundColor3 = C.title, BorderSizePixel = 0, Text = "  " .. a[1],
+				TextXAlignment = Enum.TextXAlignment.Left, Font = FONT, TextSize = 14, TextColor3 = C.text,
+				AutoButtonColor = false, LayoutOrder = k, ZIndex = 200001,
+			}, menu)
+			b.MouseEnter:Connect(function() b.BackgroundColor3 = C.sel end)
+			b.MouseLeave:Connect(function() b.BackgroundColor3 = C.title end)
+			b.Activated:Connect(function()
+				menu.Visible = false
+				a[2](inst)
+			end)
 		end
 	end
+	local m = UIS:GetMouseLocation()
+	local sz = gui.AbsoluteSize
+	menu.Position = UDim2.fromOffset(math.max(0, math.min(m.X, sz.X - 175)), math.max(0, math.min(m.Y, sz.Y - 215)))
+	menu.Visible = true
 end
 
--- Propiedades ------------------------------------------------------------------
-local propTab = addTab("Props")
-local propHeader = text(propTab, "Nada seleccionado", { Size = UDim2.new(1, 0, 0, 20), Font = FONTB, TextColor3 = C.accent2, TextTruncate = Enum.TextTruncate.AtEnd })
-local propScroll = vscroll(propTab, { Position = UDim2.fromOffset(0, 22), Size = UDim2.new(1, 0, 1, -22 - 30) })
+-- barra de acciones (para móvil, sin click derecho)
+button(actionStrip, "Ruta", function() if need() then ACTIONS[1][2](selected) end end, { TextSize = 13 })
+button(actionStrip, "Clonar", function() if need() then cloneInst(selected) end end, { TextSize = 13 })
+button(actionStrip, "Borrar", function() if need() then deleteInst(selected) end end, { TextSize = 13 })
+button(actionStrip, "TP", function() if need() then tpTo(selected) end end, { TextSize = 13 })
+button(actionStrip, "Ver", function() if need() then viewInst(selected) end end, { TextSize = 13 })
+button(actionStrip, "Normal", unview, { TextSize = 13 })
+button(actionStrip, "Script", function()
+	if need() then openScript(selected) end
+end, { TextSize = 13 })
+button(actionStrip, "↻", function() rebuild() render() end, { TextSize = 13 })
+
+----------------------------------------------------------------
+-- Properties
+----------------------------------------------------------------
+local pw = addWindow("Properties", "Properties", PX, TOP + EH + 6, PW, math.max(160, vp.Y - TOP - EH - 14), 240, 160)
+
+local filterBox = new("TextBox", {
+	Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 0, 22), BackgroundColor3 = C.btn, TextColor3 = C.text,
+	PlaceholderText = "Filter properties", PlaceholderColor3 = Color3.fromRGB(110, 110, 110), Text = "",
+	Font = FONT, TextSize = 14, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
+}, pw)
+stroke(filterBox, C.line)
+padding(filterBox, 6, 0, 6, 0)
+
+local propScroll = vscroll(pw, { Position = UDim2.fromOffset(4, 30), Size = UDim2.new(1, -8, 1, -30 - 30) })
+stroke(propScroll, C.line)
 local customBox = new("TextBox", {
-	Position = UDim2.new(0, 0, 1, -26), Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.panel, TextColor3 = C.text,
-	PlaceholderText = "+ propiedad personalizada (Enter)", PlaceholderColor3 = C.dim, Text = "", Font = FONT, TextSize = 12,
+	Position = UDim2.new(0, 4, 1, -26), Size = UDim2.new(1, -8, 0, 22), BackgroundColor3 = C.btn, TextColor3 = C.text,
+	PlaceholderText = "+ propiedad personalizada (Enter)", PlaceholderColor3 = Color3.fromRGB(110, 110, 110), Text = "", Font = FONT, TextSize = 14,
 	ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
-}, propTab)
-corner(customBox, 6)
-padding(customBox, 8, 0, 8, 0)
+}, pw)
+stroke(customBox, C.line)
+padding(customBox, 6, 0, 6, 0)
 
 local PROPS = {
 	{ "Instance", { "Name", "ClassName", "Parent", "Archivable" } },
@@ -691,17 +790,54 @@ local function setProp(inst, name, val)
 	if ok then notify(name .. " actualizado", "good") else notify("Error: " .. tostring(err), "bad") end
 end
 
-local entries, ord = {}, 0
+local entries, ord, cats, curCat, customCat = {}, 0, {}, nil, nil
+local collapsed, filterText = {}, ""
 local function nextOrder() ord += 1 return ord end
+
 local function clearProps()
 	for _, c in ipairs(propScroll:GetChildren()) do
 		if not c:IsA("UIListLayout") then c:Destroy() end
 	end
 	table.clear(entries)
+	table.clear(cats)
+	curCat, customCat = nil, nil
 	ord = 0
 end
+
+local function applyVisibility()
+	local q = filterText:lower()
+	for _, cat in ipairs(cats) do
+		local any = false
+		for _, e in ipairs(cat.entries) do
+			local match = q == "" or e.name:lower():find(q, 1, true) ~= nil
+			e.row.Visible = match and not collapsed[cat.name]
+			if match then any = true end
+		end
+		cat.header.Visible = any or q == ""
+	end
+end
+connect(filterBox:GetPropertyChangedSignal("Text"), function()
+	filterText = filterBox.Text
+	applyVisibility()
+end)
+
 local function section(name)
-	text(propScroll, "  " .. name, { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 0, BackgroundColor3 = C.panel2, Font = Enum.Font.GothamBold, TextColor3 = C.accent2, LayoutOrder = nextOrder() })
+	local cat = { name = name, entries = {} }
+	local h = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 20), BackgroundColor3 = C.title, BorderSizePixel = 0, AutoButtonColor = false,
+		Text = "", LayoutOrder = nextOrder(),
+	}, propScroll)
+	local arrow = text(h, collapsed[name] and "▸" or "▾", { Size = UDim2.fromOffset(16, 20), Position = UDim2.fromOffset(4, 0), TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center })
+	text(h, name, { Position = UDim2.fromOffset(22, 0), Size = UDim2.new(1, -22, 1, 0), Font = FONTB })
+	cat.header = h
+	h.Activated:Connect(function()
+		collapsed[name] = (not collapsed[name]) or nil
+		arrow.Text = collapsed[name] and "▸" or "▾"
+		applyVisibility()
+	end)
+	cats[#cats + 1] = cat
+	curCat = cat
+	return cat
 end
 
 local function refreshEntry(e)
@@ -727,12 +863,17 @@ local function addProp(name, get, set, readonly)
 	local ok, v = pcall(get)
 	if not ok then return false end
 	local kind = typeof(v)
-	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, LayoutOrder = nextOrder() }, propScroll)
-	text(row, " " .. name, { Size = UDim2.new(0.38, 0, 1, 0), TextColor3 = C.dim, TextTruncate = Enum.TextTruncate.AtEnd })
-	local e = { get = get, kind = kind }
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 20), BackgroundColor3 = C.panel, BorderSizePixel = 0, LayoutOrder = nextOrder() }, propScroll)
+	new("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BackgroundColor3 = C.line, BorderSizePixel = 0 }, row)
+	new("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(0.45, 0, 0, 0), BackgroundColor3 = C.line, BorderSizePixel = 0 }, row)
+	text(row, name, { Position = UDim2.fromOffset(8, 0), Size = UDim2.new(0.45, -10, 1, -1), TextColor3 = Color3.fromRGB(215, 215, 215), TextTruncate = Enum.TextTruncate.AtEnd })
+	local e = { get = get, kind = kind, name = name, row = row }
 	local hasSwatch = (kind == "Color3" or kind == "BrickColor")
-	local boxW = hasSwatch and UDim2.new(0.62, -22, 1, -2) or UDim2.new(0.62, 0, 1, -2)
-	local base = { Position = UDim2.new(0.38, 0, 0, 1), Size = boxW, BackgroundColor3 = C.panel2, TextColor3 = C.text, Font = FONT, TextSize = 11, BorderSizePixel = 0, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }
+	local boxW = hasSwatch and UDim2.new(0.55, -22, 1, -1) or UDim2.new(0.55, -1, 1, -1)
+	local base = {
+		Position = UDim2.new(0.45, 1, 0, 0), Size = boxW, BackgroundTransparency = 1, TextColor3 = C.text, Font = FONT, TextSize = 14,
+		BorderSizePixel = 0, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+	}
 	local box
 	if kind == "boolean" and not readonly then
 		base.AutoButtonColor = false
@@ -753,7 +894,9 @@ local function addProp(name, get, set, readonly)
 		base.ClearTextOnFocus = false
 		base.TextEditable = not (readonly or kind == "nil")
 		box = new("TextBox", base, row)
+		box.Focused:Connect(function() box.BackgroundTransparency = 0 box.BackgroundColor3 = C.btn end)
 		box.FocusLost:Connect(function(enter)
+			box.BackgroundTransparency = 1
 			if not enter or box.TextEditable == false then refreshEntry(e) return end
 			local ok2, cur = pcall(get)
 			local nv = ok2 and parseFor(cur, box.Text) or nil
@@ -761,30 +904,33 @@ local function addProp(name, get, set, readonly)
 			refreshEntry(e)
 		end)
 	end
-	corner(box, 4)
 	padding(box, 6, 0, 4, 0)
 	e.box = box
 	if hasSwatch then
-		e.swatch = new("Frame", { Size = UDim2.fromOffset(16, 16), Position = UDim2.new(1, -18, 0.5, -8), BackgroundColor3 = Color3.new(), BorderSizePixel = 0 }, row)
-		corner(e.swatch, 4)
-		stroke(e.swatch)
+		e.swatch = new("Frame", { Size = UDim2.fromOffset(14, 14), Position = UDim2.new(1, -18, 0.5, -7), BackgroundColor3 = Color3.new(), BorderSizePixel = 0 }, row)
+		stroke(e.swatch, C.line)
 	end
 	entries[#entries + 1] = e
+	if curCat then curCat.entries[#curCat.entries + 1] = e end
 	refreshEntry(e)
 	return true
 end
 
 buildProps = function(inst)
 	clearProps()
-	if not inst then propHeader.Text = "Nada seleccionado" return end
-	propHeader.Text = " " .. inst.ClassName .. "  ·  " .. inst.Name
+	if not inst then windows.Properties.title.Text = "Properties" return end
+	windows.Properties.title.Text = "Properties - " .. inst.ClassName .. ' "' .. inst.Name .. '"'
 	local seen = {}
-	section("Propiedades")
 	for _, def in ipairs(PROPS) do
 		if inst:IsA(def[1]) then
+			local started = false
 			for _, pn in ipairs(def[2]) do
 				if not seen[pn] then
 					seen[pn] = true
+					if not started then
+						section(def[1] == "Instance" and "Data" or def[1])
+						started = true
+					end
 					addProp(pn, function() return getProp(inst, pn) end, function(v) setProp(inst, pn, v) end, READONLY[pn])
 				end
 			end
@@ -792,7 +938,7 @@ buildProps = function(inst)
 	end
 	local ok, at = pcall(function() return inst:GetAttributes() end)
 	if ok and next(at) then
-		section("Atributos")
+		section("Attributes")
 		for k in pairs(at) do
 			addProp(k, function() return inst:GetAttribute(k) end, function(nv) inst:SetAttribute(k, nv) notify("Atributo " .. k .. " actualizado", "good") end)
 		end
@@ -800,100 +946,424 @@ buildProps = function(inst)
 	local ok2, tg = pcall(function() return CollectionService:GetTags(inst) end)
 	if ok2 and #tg > 0 then
 		section("Tags")
-		text(propScroll, "  " .. table.concat(tg, ", "), { Size = UDim2.new(1, 0, 0, 20), TextColor3 = C.warn, LayoutOrder = nextOrder(), TextTruncate = Enum.TextTruncate.AtEnd })
+		local lbl = text(propScroll, "  " .. table.concat(tg, ", "), { Size = UDim2.new(1, 0, 0, 20), TextColor3 = C.warn, LayoutOrder = nextOrder(), TextTruncate = Enum.TextTruncate.AtEnd })
+		curCat.entries[#curCat.entries + 1] = { name = "tags", row = lbl }
 	end
+	applyVisibility()
 end
 
 connect(customBox.FocusLost, function(enter)
 	if not enter or not selected or customBox.Text == "" then return end
 	local pn, inst = customBox.Text, selected
+	if not customCat then customCat = section("Custom") else curCat = customCat end
 	local added = addProp(pn, function() return getProp(inst, pn) end, function(v) setProp(inst, pn, v) end)
 	notify(added and ("Añadida: " .. pn) or ("No existe / inaccesible: " .. pn), added and "good" or "bad")
 	customBox.Text = ""
+	applyVisibility()
 end)
 
--- Script viewer ----------------------------------------------------------------
-local scriptTab = addTab("Script")
-local sBar = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1 }, scriptTab)
-hlist(sBar, 4)
-local codeScroll = vscroll(scriptTab, { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 1, -28), BackgroundColor3 = Color3.fromRGB(14, 14, 20) })
-local lastSource, lastName = "", "script"
+----------------------------------------------------------------
+-- Script Viewer (rehecho)
+----------------------------------------------------------------
+-- Antes el código se metía en TextLabels de 100 líneas: si esas líneas sumaban más de 16384
+-- caracteres (código minificado/ofuscado) Roblox dejaba el label VACÍO. Ahora cada línea es su
+-- propio label y sólo se dibujan las líneas visibles (scroll virtual), sin límite de tamaño.
+do
+local sw = addWindow("Script", "Script Viewer", 8, TOP, SW, SH, 320, 200)
 
-local function showCode(str)
-	lastSource = str
-	for _, c in ipairs(codeScroll:GetChildren()) do
-		if c:IsA("TextLabel") then c:Destroy() end
-	end
-	local chunk, count, order = {}, 0, 0
+local sBar = toolbar(sw, 4)
+local sInfo = text(sw, "Selecciona un LocalScript / ModuleScript y pulsa Decompilar (o doble click en el Explorer).", {
+	Position = UDim2.new(0, 6, 1, -18), Size = UDim2.new(1, -26, 0, 16), TextColor3 = C.dim, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local LH, TS, MAXCOL = 16, 14, 700
+local CW = 8
+pcall(function()
+	local sz = TextService:GetTextSize("MMMMMMMMMM", TS, MONO, Vector2.new(1e5, 1e5))
+	if sz.X > 20 then CW = sz.X / 10 end
+end)
+
+local SYN = {
+	text = Color3.fromRGB(204, 204, 204), number = Color3.fromRGB(255, 198, 0), string = Color3.fromRGB(173, 241, 149),
+	comment = Color3.fromRGB(102, 102, 102), keyword = Color3.fromRGB(248, 109, 124), builtin = Color3.fromRGB(132, 214, 247),
+	prop = Color3.fromRGB(131, 222, 255), fname = Color3.fromRGB(253, 251, 172), bool = Color3.fromRGB(255, 198, 0),
+}
+local HEX = {}
+for k, c in pairs(SYN) do
+	HEX[k] = ("#%02x%02x%02x"):format(math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+local gutter = new("Frame", { Position = UDim2.fromOffset(4, 30), Size = UDim2.new(0, 40, 1, -30 - 20), BackgroundColor3 = Color3.fromRGB(40, 40, 40), BorderSizePixel = 0, ClipsDescendants = true }, sw)
+local codeScroll = new("ScrollingFrame", {
+	Position = UDim2.fromOffset(44, 30), Size = UDim2.new(1, -48, 1, -30 - 20), BackgroundColor3 = C.bg, BorderSizePixel = 0,
+	ScrollBarThickness = 10, ScrollBarImageColor3 = C.scroll, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.None,
+	ScrollingDirection = Enum.ScrollingDirection.XY,
+}, sw)
+stroke(codeScroll, C.line)
+
+local KW = {}
+for w in ("and break do else elseif end for function if in local not or repeat return then until while continue"):gmatch("%a+") do KW[w] = true end
+local BUILTIN = {}
+for w in ([[game workspace script math string table task os tick time print warn error pcall xpcall ipairs pairs next type typeof tostring tonumber
+require select unpack setmetatable getmetatable rawget rawset rawequal rawlen wait spawn delay Instance Vector3 Vector2 CFrame Color3 UDim2 UDim Enum
+Random bit32 coroutine utf8 debug assert newproxy shared _G Ray Region3 BrickColor TweenInfo NumberSequence ColorSequence Rect buffer
+loadstring getgenv getrenv getfenv setfenv Drawing]]):gmatch("[%w_]+") do BUILTIN[w] = true end
+
+local ESC = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;", ['"'] = "&quot;", ["'"] = "&apos;" }
+local function esc(s) return (s:gsub("[&<>\"']", ESC)) end
+
+-- resaltado por línea (st guarda el estado de comentarios/strings largos entre líneas)
+local function hlLine(line, st)
+	local out, plain = {}, {}
 	local function flush()
-		if #chunk == 0 then return end
-		order += 1
-		text(codeScroll, table.concat(chunk, "\n"), {
-			Font = MONO, TextSize = 12, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, -6, 0, 0),
-			TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = order, TextColor3 = Color3.fromRGB(205, 215, 235),
-		})
-		chunk = {}
+		if #plain > 0 then out[#out + 1] = esc(table.concat(plain)) plain = {} end
 	end
-	for line in (str .. "\n"):gmatch("(.-)\n") do
-		count += 1
-		line = line:gsub("\t", "  ")
-		if #line > 400 then line = line:sub(1, 400) .. " …" end
-		chunk[#chunk + 1] = ("%4d│ %s"):format(count, line)
-		if #chunk >= 100 then flush() end
-		if count >= 8000 then chunk[#chunk + 1] = "-- … recortado en 8000 líneas (usa Copiar/Guardar para el total)" break end
+	local function col(c, s)
+		if s == "" then return end
+		flush()
+		out[#out + 1] = '<font color="' .. HEX[c] .. '">' .. esc(s) .. "</font>"
+	end
+	local i, n, prev = 1, #line, nil
+	while i <= n do
+		if st.long then
+			local close = "]" .. string.rep("=", st.long.eq) .. "]"
+			local _, b = line:find(close, i, true)
+			if b then col(st.long.kind, line:sub(i, b)) i = b + 1 st.long = nil
+			else col(st.long.kind, line:sub(i)) i = n + 1 end
+		else
+			local c = line:sub(i, i)
+			if c == "-" and line:sub(i + 1, i + 1) == "-" then
+				local eq = line:match("^%-%-%[(=*)%[", i)
+				if eq then
+					st.long = { eq = #eq, kind = "comment" }
+					col("comment", line:sub(i, i + 3 + #eq))
+					i = i + 4 + #eq
+				else
+					col("comment", line:sub(i))
+					i = n + 1
+				end
+			elseif c == '"' or c == "'" or c == "`" then
+				local j = i + 1
+				while j <= n do
+					local ch = line:sub(j, j)
+					if ch == "\\" then j = j + 2
+					elseif ch == c then break
+					else j = j + 1 end
+				end
+				col("string", line:sub(i, math.min(j, n)))
+				i = j + 1
+				prev = nil
+			elseif c == "[" and line:match("^%[=*%[", i) then
+				local eq = line:match("^%[(=*)%[", i)
+				st.long = { eq = #eq, kind = "string" }
+				col("string", line:sub(i, i + 1 + #eq))
+				i = i + 2 + #eq
+			elseif c:match("%d") or (c == "." and line:sub(i + 1, i + 1):match("%d")) then
+				local s = line:match("^0[xX][%x_]+", i) or line:match("^0[bB][01_]+", i)
+					or line:match("^%d[%d_]*%.?%d*[eE][%+%-]?%d+", i) or line:match("^%d[%d_]*%.?%d*", i)
+					or line:match("^%.%d+", i) or c
+				col("number", s)
+				i = i + #s
+				prev = nil
+			elseif c:match("[%a_]") then
+				local w = line:match("^[%a_][%w_]*", i)
+				local nextc = line:match("^%s*(.)", i + #w)
+				local cc
+				if KW[w] then cc = "keyword"
+				elseif prev == "function" then cc = "fname"
+				elseif prev == "." or prev == ":" then cc = (nextc == "(") and "fname" or "prop"
+				elseif w == "true" or w == "false" or w == "nil" then cc = "bool"
+				elseif w == "self" then cc = "keyword"
+				elseif BUILTIN[w] then cc = "builtin" end
+				if cc then col(cc, w) else plain[#plain + 1] = w end
+				prev = (w == "function") and "function" or nil
+				i = i + #w
+			elseif c == "." then
+				if line:sub(i, i + 1) == ".." then
+					local s = line:match("^%.%.%.?", i)
+					plain[#plain + 1] = s
+					i = i + #s
+					prev = nil
+				else
+					plain[#plain + 1] = "."
+					i = i + 1
+					prev = "."
+				end
+			elseif c == ":" then
+				if line:sub(i, i + 1) == "::" then
+					plain[#plain + 1] = "::"
+					i = i + 2
+					prev = nil
+				else
+					plain[#plain + 1] = ":"
+					i = i + 1
+					prev = ":"
+				end
+			else
+				plain[#plain + 1] = c
+				i = i + 1
+				if not c:match("%s") then prev = nil end
+			end
+		end
 	end
 	flush()
+	return table.concat(out)
+end
+
+-- estado del visor ---------------------------------------------------------------
+local V = { lines = {}, hl = {}, n = 0, canvasW = 100 }
+local codeRows, numRows = {}, {}
+local lastSource, lastName, curScript, loadTok = "", "script", nil, 0
+
+local function renderCode()
+	local cy = codeScroll.CanvasPosition.Y
+	local viewH = codeScroll.AbsoluteSize.Y
+	local first = math.max(1, math.floor(cy / LH) + 1)
+	local needRows = math.ceil(viewH / LH) + 2
+	for i = 1, math.max(needRows, #codeRows) do
+		local ln = first + i - 1
+		local cr, nr = codeRows[i], numRows[i]
+		if i <= needRows and ln <= V.n then
+			if not cr then
+				cr = new("TextLabel", {
+					BackgroundTransparency = 1, Font = MONO, TextSize = TS, RichText = true, TextXAlignment = Enum.TextXAlignment.Left,
+					TextYAlignment = Enum.TextYAlignment.Center, TextColor3 = SYN.text, TextWrapped = false, BorderSizePixel = 0, Text = "",
+				}, codeScroll)
+				nr = new("TextLabel", {
+					BackgroundTransparency = 1, Font = MONO, TextSize = TS, TextXAlignment = Enum.TextXAlignment.Right,
+					TextYAlignment = Enum.TextYAlignment.Center, TextColor3 = Color3.fromRGB(125, 125, 125), BorderSizePixel = 0, Text = "",
+				}, gutter)
+				codeRows[i], numRows[i] = cr, nr
+			end
+			cr.Size = UDim2.fromOffset(V.canvasW, LH)
+			cr.Position = UDim2.fromOffset(6, (ln - 1) * LH)
+			cr.Text = V.hl[ln] or esc(V.lines[ln])
+			cr.Visible = true
+			nr.Size = UDim2.new(1, -6, 0, LH)
+			nr.Position = UDim2.fromOffset(0, (ln - 1) * LH - cy)
+			nr.Text = tostring(ln)
+			nr.Visible = true
+		else
+			if cr then cr.Visible = false end
+			if nr then nr.Visible = false end
+		end
+	end
+end
+connect(codeScroll:GetPropertyChangedSignal("CanvasPosition"), renderCode)
+connect(codeScroll:GetPropertyChangedSignal("AbsoluteSize"), renderCode)
+
+local function setCode(src, info)
+	lastSource = src
+	src = src:gsub("\r\n", "\n")
+	src = src:gsub("\r", "\n")
+	local lines, maxLen = {}, 0
+	for raw in (src .. "\n"):gmatch("(.-)\n") do
+		local line = raw:gsub("\t", "    ")
+		line = line:gsub("[\0-\8\11-\31]", "")
+		if not utf8.len(line) then line = line:gsub("[\128-\255]", "?") end
+		if #line > MAXCOL then line = line:sub(1, MAXCOL) .. " …" end
+		lines[#lines + 1] = line
+		if #line > maxLen then maxLen = #line end
+	end
+	local my = { lines = lines, hl = {}, n = #lines }
+	V = my
+	local gw = math.max(34, #tostring(my.n) * CW + 14)
+	gutter.Size = UDim2.new(0, gw, 1, -30 - 20)
+	codeScroll.Position = UDim2.fromOffset(4 + gw, 30)
+	codeScroll.Size = UDim2.new(1, -(8 + gw), 1, -30 - 20)
+	my.canvasW = math.max(codeScroll.AbsoluteSize.X, maxLen * CW + 30)
+	codeScroll.CanvasSize = UDim2.fromOffset(my.canvasW, my.n * LH + 10)
+	codeScroll.CanvasPosition = Vector2.zero
+	sInfo.Text = (info or "") .. (info and info ~= "" and " · " or "") .. my.n .. " líneas"
+	renderCode()
+	-- resaltado en segundo plano (por tandas para no congelar el juego)
+	task.spawn(function()
+		local st = {}
+		local limit = math.min(my.n, 30000)
+		for i = 1, limit do
+			if V ~= my or not alive then return end
+			local ok, r = pcall(hlLine, lines[i], st)
+			my.hl[i] = ok and r or nil
+			if i % 300 == 0 then
+				task.wait()
+				if V == my then renderCode() end
+			end
+		end
+		if V == my then renderCode() end
+	end)
+end
+
+-- obtención del código ------------------------------------------------------------
+local function withTimeout(fn, sec)
+	local done, ok, res = false, false, nil
+	task.spawn(function()
+		ok, res = pcall(fn)
+		done = true
+	end)
+	local t0 = os.clock()
+	while not done and os.clock() - t0 < sec do task.wait() end
+	if not done then return false, "tiempo agotado (" .. sec .. "s)" end
+	return ok, res
+end
+
+local function looksFailed(s)
+	if s:match("^%s*$") then return true end
+	if #s < 600 then
+		local h = s:lower()
+		if h:find("failed to decompile", 1, true) or h:find("decompilation failed", 1, true)
+			or h:find("unable to decompile", 1, true) or h:find("cannot decompile", 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+-- último recurso: constantes del bytecode (strings/números/nombres) si no hay decompilador
+local function dumpClosure(inst)
+	local getc = getscriptclosure or getscriptfunction
+	if not getc or not (debug and debug.getconstants) then return nil end
+	local ok, f = pcall(getc, inst)
+	if not ok or type(f) ~= "function" then return nil end
+	local out = { "-- No se pudo decompilar. Constantes encontradas en el bytecode (debug.getconstants):" }
+	local seen, total = {}, 0
+	local function walk(fn, depth, label)
+		if depth > 3 or seen[fn] or total > 4000 then return end
+		seen[fn] = true
+		out[#out + 1] = "\n-- " .. string.rep("  ", depth) .. label
+		local okc, cs = pcall(debug.getconstants, fn)
+		if okc and type(cs) == "table" then
+			local keys = {}
+			for k in pairs(cs) do keys[#keys + 1] = k end
+			table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+			for _, k in ipairs(keys) do
+				local v = cs[k]
+				if type(v) == "string" or type(v) == "number" then
+					total += 1
+					out[#out + 1] = string.rep("  ", depth) .. (type(v) == "string" and ("%q"):format(v) or tostring(v))
+				end
+			end
+		end
+		if debug.getprotos then
+			local okp, ps = pcall(debug.getprotos, fn)
+			if okp and type(ps) == "table" then
+				for idx2, p in ipairs(ps) do walk(p, depth + 1, "función #" .. idx2) end
+			end
+		end
+	end
+	walk(f, 0, "principal")
+	return #out > 1 and table.concat(out, "\n") or nil
+end
+
+local function fetchSource(inst)
+	local log = {}
+	local function attempt(name, fn)
+		local ok, r = withTimeout(fn, 12)
+		if ok and type(r) == "string" and not looksFailed(r) then return r end
+		local why
+		if not ok then why = tostring(r)
+		elseif type(r) ~= "string" then why = "devolvió " .. type(r)
+		elseif r:match("^%s*$") then why = "vacío"
+		else why = "falló: " .. r:sub(1, 80):gsub("\n", " ") end
+		log[#log + 1] = name .. " → " .. why
+	end
+	local src
+	if type(decompile) == "function" then
+		src = attempt("decompile()", function() return decompile(inst) end)
+		if src then return src, "decompile()", log end
+	else
+		log[#log + 1] = "decompile() → no existe en tu executor"
+	end
+	src = attempt(".Source", function() return inst.Source end)
+	if src then return src, ".Source", log end
+	if type(getscriptbytecode) == "function" and type(decompile) == "function" then
+		src = attempt("decompile(bytecode)", function() return decompile(getscriptbytecode(inst)) end)
+		if src then return src, "decompile(bytecode)", log end
+	end
+	local okd, dump = pcall(dumpClosure, inst)
+	if okd and dump then return dump, "constantes (sin decompilador)", log end
+	return nil, nil, log
 end
 
 loadScript = function(inst)
 	if not inst or not inst:IsA("LuaSourceContainer") then notify("Selecciona un script", "warn") return end
 	lastName = inst.Name
+	curScript = inst
+	loadTok += 1
+	local my = loadTok
 	task.spawn(function()
-		showCode("-- decompilando " .. inst.Name .. " ...")
-		local src
-		if decompile then
-			local ok, r = pcall(decompile, inst)
-			src = (ok and type(r) == "string") and r or ("-- error al decompilar: " .. tostring(r))
+		setCode("-- obteniendo el código de " .. inst:GetFullName() .. " ...", "cargando")
+		local src, method, log = fetchSource(inst)
+		if my ~= loadTok or not alive then return end
+		if src then
+			lastName = inst.Name
+			setCode(src, inst.ClassName .. " " .. inst.Name .. " · " .. method)
+			lastSource = src
 		else
-			local ok, r = pcall(function() return inst.Source end)
-			src = ok and r or "-- tu executor no tiene decompile()"
+			local msg = { "-- No se pudo obtener el código de " .. inst:GetFullName(), "--" }
+			for _, l in ipairs(log) do msg[#msg + 1] = "--   " .. l end
+			msg[#msg + 1] = "--"
+			msg[#msg + 1] = "-- Posibles causas: tu executor no soporta decompile(), el script está vacío/sin bytecode"
+			msg[#msg + 1] = "-- (p. ej. un Script de servidor) o el nivel de identidad no permite leer .Source."
+			if inst:IsA("ModuleScript") then msg[#msg + 1] = "-- Es un ModuleScript: prueba el botón «Dump módulo» para ver lo que devuelve." end
+			setCode(table.concat(msg, "\n"), inst.ClassName .. " " .. inst.Name .. " · sin código")
+			lastSource = ""
 		end
-		if src == "" then src = "-- (vacío)" end
-		showCode(src)
 	end)
 end
 
-button(sBar, "Decompilar", function() if need() then loadScript(selected) end end)
+button(sBar, "Decompilar", function()
+	local target = (selected and selected:IsA("LuaSourceContainer")) and selected or curScript
+	if target then loadScript(target) else notify("Selecciona un script en el Explorer", "warn") end
+end, { TextSize = 13 })
 button(sBar, "Dump módulo", function()
-	if not need() then return end
-	if not selected:IsA("ModuleScript") then notify("Solo ModuleScript", "warn") return end
+	local target = (selected and selected:IsA("ModuleScript")) and selected or curScript
+	if not target or not target:IsA("ModuleScript") then notify("Selecciona un ModuleScript", "warn") return end
 	task.spawn(function()
-		local ok, res = pcall(require, selected)
-		if ok then lastName = selected.Name showCode("return " .. ser(res)) else notify("require falló: " .. tostring(res), "bad") end
+		local ok, res = pcall(require, target)
+		if ok then
+			lastName = target.Name
+			setCode("return " .. ser(res), "ModuleScript " .. target.Name .. " · require()")
+		else
+			notify("require falló: " .. tostring(res), "bad")
+		end
 	end)
-end)
-button(sBar, "Copiar", function() notify(copy(lastSource) and "Código copiado" or "Sin setclipboard", "good") end)
+end, { TextSize = 13 })
+button(sBar, "Copiar", function()
+	if lastSource == "" then notify("No hay código que copiar", "warn") return end
+	copyN(lastSource, "Código copiado")
+end, { TextSize = 13 })
 button(sBar, "Guardar", function()
+	if lastSource == "" then notify("No hay código que guardar", "warn") return end
 	if not writefile then notify("Sin writefile", "bad") return end
 	if makefolder and isfolder and not isfolder("R4NDex") then makefolder("R4NDex") end
 	local path = "R4NDex/" .. lastName:gsub("[^%w_%-]", "_") .. ".lua"
 	local ok = pcall(writefile, path, lastSource)
 	notify(ok and ("Guardado: " .. path) or "Error al guardar", ok and "good" or "bad")
-end)
+end, { TextSize = 13 })
+end
 
--- Remote Spy -------------------------------------------------------------------
-local remTab = addTab("Remotes")
-local rBar = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1 }, remTab)
-hlist(rBar, 4)
-local rList = vscroll(remTab, { Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0.45, -28) })
-local rDetail = vscroll(remTab, { Position = UDim2.new(0, 0, 0.45, 4), Size = UDim2.new(1, 0, 0.55, -4), BackgroundColor3 = Color3.fromRGB(14, 14, 20) })
-local rDetailText = text(rDetail, "Selecciona una llamada para ver el código.", { Font = MONO, TextSize = 11, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, -6, 0, 0), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = C.dim })
+----------------------------------------------------------------
+-- Remote Spy
+----------------------------------------------------------------
+local rc = addWindow("Remotes", "Remote Spy", 8, TOP, SW, math.min(380, vp.Y - TOP - 8), 320, 220)
+local rBar = toolbar(rc, 4)
+local rList = vscroll(rc, { Position = UDim2.fromOffset(4, 30), Size = UDim2.new(1, -8, 0.45, -30) })
+stroke(rList, C.line)
+local rDetail = vscroll(rc, { Position = UDim2.new(0, 4, 0.45, 4), Size = UDim2.new(1, -8, 0.55, -8) })
+stroke(rDetail, C.line)
+local rDetailText = text(rDetail, "Selecciona una llamada para ver el código.", {
+	Font = MONO, TextSize = 13, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, -6, 0, 0),
+	TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = C.dim,
+})
+padding(rDetailText, 4, 2, 4, 2)
 
 local logs, logSel, logN, blocked = {}, nil, 0, {}
 local function genCode(e)
 	local parts = {}
 	for i = 1, e.args.n do parts[i] = ser(e.args[i]) end
-	return ("local args = {%s}\n%s:%s(unpack(args, 1, %d))"):format(table.concat(parts, ", "), getPath(e.remote), e.method, e.args.n)
+	local s = ("local args = {%s}\n%s:%s(unpack(args, 1, %d))"):format(table.concat(parts, ", "), getPath(e.remote), e.method, e.args.n)
+	if #s > 12000 then s = s:sub(1, 12000) .. "\n-- ... (recortado)" end
+	return s
 end
 local function addLog(remote, method, args)
 	if not alive then return end
@@ -901,14 +1371,18 @@ local function addLog(remote, method, args)
 	local e = { remote = remote, method = method, args = args }
 	logs[#logs + 1] = e
 	local b = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, 20), BackgroundColor3 = C.panel2, BackgroundTransparency = 0.4, BorderSizePixel = 0, AutoButtonColor = false,
-		Font = MONO, TextSize = 11, TextColor3 = method == "FireServer" and C.text or C.warn, TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, 0, 0, 20), BackgroundColor3 = C.panel, BackgroundTransparency = 0, BorderSizePixel = 0, AutoButtonColor = false,
+		Font = MONO, TextSize = 13, TextColor3 = method == "FireServer" and C.text or C.warn, TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd, Text = (" [%s] %s  %s  (%d)"):format(os.date("%H:%M:%S"), method == "FireServer" and "F" or "I", remote.Name, args.n),
 		LayoutOrder = logN,
 	}, rList)
 	e.btn = b
+	b.MouseEnter:Connect(function() if logSel ~= e then b.BackgroundColor3 = C.hover end end)
+	b.MouseLeave:Connect(function() if logSel ~= e then b.BackgroundColor3 = C.panel end end)
 	b.Activated:Connect(function()
+		if logSel and logSel.btn then logSel.btn.BackgroundColor3 = C.panel end
 		logSel = e
+		b.BackgroundColor3 = C.sel
 		rDetailText.TextColor3 = C.text
 		rDetailText.Text = genCode(e)
 	end)
@@ -923,15 +1397,15 @@ local spyBtn
 spyBtn = button(rBar, "⏸ Pausar", function()
 	spyOn = not spyOn
 	spyBtn.Text = spyOn and "⏸ Pausar" or "▶ Reanudar"
-end)
+end, { TextSize = 13 })
 button(rBar, "Limpiar", function()
 	for _, e in ipairs(logs) do if e.btn then e.btn:Destroy() end end
 	table.clear(logs)
 	logSel = nil
-end)
+end, { TextSize = 13 })
 button(rBar, "Copiar", function()
-	if logSel then notify(copy(genCode(logSel)) and "Código copiado" or "Sin setclipboard", "good") else notify("Selecciona una llamada", "warn") end
-end)
+	if logSel then copyN(genCode(logSel), "Código copiado") else notify("Selecciona una llamada", "warn") end
+end, { TextSize = 13 })
 button(rBar, "Reenviar", function()
 	if not logSel then notify("Selecciona una llamada", "warn") return end
 	local e = logSel
@@ -942,16 +1416,16 @@ button(rBar, "Reenviar", function()
 		end)
 		notify(ok and "Reenviado" or ("Error: " .. tostring(err)), ok and "good" or "bad")
 	end)
-end)
+end, { TextSize = 13 })
 button(rBar, "Bloquear", function()
 	if not logSel then notify("Selecciona una llamada", "warn") return end
 	local r = logSel.remote
 	blocked[r] = (not blocked[r]) or nil
 	notify((blocked[r] and "Bloqueado: " or "Desbloqueado: ") .. r.Name, "warn")
-end)
+end, { TextSize = 13 })
 button(rBar, "Ir al remote", function()
-	if logSel then selectInst(logSel.remote) reveal(logSel.remote) showTab("Props") end
-end)
+	if logSel then selectInst(logSel.remote) reveal(logSel.remote) showTab("Explorer") showTab("Properties") end
+end, { TextSize = 13 })
 
 local hookOk = false
 if hookmetamethod and getnamecallmethod then
@@ -976,16 +1450,19 @@ if not hookOk then
 	rDetailText.TextColor3 = C.warn
 end
 
--- Consola ----------------------------------------------------------------------
-local conTab = addTab("Consola")
-local conScroll = vscroll(conTab, { Size = UDim2.new(1, 0, 1, -30), BackgroundColor3 = Color3.fromRGB(14, 14, 20) })
+----------------------------------------------------------------
+-- Console
+----------------------------------------------------------------
+local cc = addWindow("Console", "Console", 8, TOP, SW, math.min(360, vp.Y - TOP - 8), 300, 200)
+local conScroll = vscroll(cc, { Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 1, -4 - 30) })
+stroke(conScroll, C.line)
 local conBox = new("TextBox", {
-	Position = UDim2.new(0, 0, 1, -26), Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.panel, TextColor3 = C.text,
-	PlaceholderText = "Ejecutar Lua (Enter)…", PlaceholderColor3 = C.dim, Text = "", Font = MONO, TextSize = 12,
+	Position = UDim2.new(0, 4, 1, -26), Size = UDim2.new(1, -8, 0, 22), BackgroundColor3 = C.btn, TextColor3 = C.text,
+	PlaceholderText = "Ejecutar Lua (Enter)…", PlaceholderColor3 = Color3.fromRGB(110, 110, 110), Text = "", Font = MONO, TextSize = 13,
 	ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
-}, conTab)
-corner(conBox, 6)
-padding(conBox, 8, 0, 8, 0)
+}, cc)
+stroke(conBox, C.line)
+padding(conBox, 6, 0, 6, 0)
 
 local conColors = {
 	[Enum.MessageType.MessageOutput] = C.text, [Enum.MessageType.MessageInfo] = C.accent2,
@@ -995,9 +1472,10 @@ local conN, conLines = 0, {}
 local function cLine(msg, mtype)
 	conN += 1
 	local l = text(conScroll, msg, {
-		Font = MONO, TextSize = 11, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, -6, 0, 0), TextWrapped = true,
+		Font = MONO, TextSize = 13, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, -6, 0, 0), TextWrapped = true,
 		TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = conColors[mtype] or C.text, LayoutOrder = conN,
 	})
+	l.Parent = conScroll
 	conLines[#conLines + 1] = l
 	if #conLines > 400 then table.remove(conLines, 1):Destroy() end
 	conScroll.CanvasPosition = Vector2.new(0, 1e6)
@@ -1020,13 +1498,16 @@ connect(conBox.FocusLost, function(enter)
 	end)
 end)
 
--- Herramientas -----------------------------------------------------------------
-local toolTab = addTab("Tools")
-local toolScroll = vscroll(toolTab, { Size = UDim2.new(1, 0, 1, 0) })
-padding(toolScroll, 4)
+----------------------------------------------------------------
+-- Tools
+----------------------------------------------------------------
+local tc = addWindow("Tools", "Tools", 8, TOP, SW, math.min(330, vp.Y - TOP - 8), 280, 200)
+local toolScroll = vscroll(tc, { Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 1, -8) })
+stroke(toolScroll, C.line)
+local toolOrd = 0
 local function tool(label, fn)
-	local b = button(toolScroll, label, fn, { Size = UDim2.new(1, 0, 0, 26), AutomaticSize = Enum.AutomaticSize.None, TextXAlignment = Enum.TextXAlignment.Left })
-	b.LayoutOrder = nextOrder()
+	toolOrd += 1
+	button(toolScroll, label, fn, { Size = UDim2.new(1, 0, 0, 26), AutomaticSize = Enum.AutomaticSize.None, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = toolOrd })
 end
 local function treeText(inst, maxDepth, maxLines)
 	local out = {}
@@ -1039,7 +1520,7 @@ local function treeText(inst, maxDepth, maxLines)
 	return table.concat(out, "\n")
 end
 tool("📋 Copiar árbol del seleccionado", function()
-	if need() then notify(copy(treeText(selected, 6, 3000)) and "Árbol copiado" or "Sin setclipboard", "good") end
+	if need() then copyN(treeText(selected, 6, 3000), "Árbol copiado") end
 end)
 tool("💾 Guardar árbol en archivo", function()
 	if not need() then return end
@@ -1082,7 +1563,8 @@ tool("📦 Guardar juego (saveinstance)", function()
 end)
 tool("🔎 Ver compatibilidad del executor", function()
 	local caps = {
-		decompile = decompile, hookmetamethod = hookmetamethod, getnilinstances = getnilinstances, getscripts = getscripts,
+		decompile = decompile, getscriptbytecode = getscriptbytecode, getscriptclosure = getscriptclosure,
+		hookmetamethod = hookmetamethod, getnilinstances = getnilinstances, getscripts = getscripts,
 		getloadedmodules = getloadedmodules, setclipboard = setclipboard or toclipboard, writefile = writefile,
 		fireproximityprompt = fireproximityprompt, fireclickdetector = fireclickdetector, saveinstance = saveinstance,
 		gethiddenproperty = gethiddenproperty, sethiddenproperty = sethiddenproperty, cloneref = cloneref, gethui = gethui,
@@ -1091,31 +1573,57 @@ tool("🔎 Ver compatibilidad del executor", function()
 	for k, v in pairs(caps) do out[#out + 1] = (v and "✔ " or "✖ ") .. k end
 	table.sort(out)
 	cLine("— Compatibilidad —\n" .. table.concat(out, "\n"), Enum.MessageType.MessageInfo)
-	showTab("Consola")
+	showTab("Console")
 end)
 
 ----------------------------------------------------------------
--- Bucle principal, atajos y cierre
+-- Bucle principal, atajos, barra de ventanas y cierre
 ----------------------------------------------------------------
 local acc = 0
 connect(RunService.Heartbeat, function(dt)
-	if not alive or minimized or not gui.Enabled then return end
+	if not alive or not gui.Enabled then return end
 	acc += dt
-	if dirty and searchText == "" and os.clock() - lastBuild > 0.35 then
+	if dirty and searchText == "" and windows.Explorer.frame.Visible and os.clock() - lastBuild > 0.35 then
 		dirty, lastBuild = false, os.clock()
 		rebuild()
 		render()
 	end
 	if acc >= 0.5 then
 		acc = 0
-		if tabs.current == "Props" then
+		if windows.Properties.frame.Visible then
 			for _, e in ipairs(entries) do refreshEntry(e) end
 		end
 	end
 end)
 
 connect(UIS.InputBegan, function(i, gp)
-	if not gp and i.KeyCode == Enum.KeyCode.RightShift then gui.Enabled = not gui.Enabled end
+	if not gp and i.KeyCode == Enum.KeyCode.RightShift then
+		gui.Enabled = not gui.Enabled
+		return
+	end
+	if isPress(i) then
+		local p = pointer(i)
+		-- cerrar el menú contextual si se pulsa fuera de él
+		if menu.Visible then
+			local a, s = menu.AbsolutePosition, menu.AbsoluteSize
+			if not (p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y) then menu.Visible = false end
+		end
+		-- traer al frente la ventana pulsada
+		local best
+		for _, w in pairs(windows) do
+			local f = w.frame
+			if f.Visible then
+				local a, s = f.AbsolutePosition, f.AbsoluteSize
+				if p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y and (not best or f.ZIndex > best.ZIndex) then
+					best = f
+				end
+			end
+		end
+		if best and best.ZIndex < topZ then
+			topZ += 1
+			best.ZIndex = topZ
+		end
+	end
 end)
 
 local function destroy()
@@ -1125,10 +1633,36 @@ local function destroy()
 	pcall(function() gui:Destroy() end)
 	env.R4NDex = nil
 end
-closeBtn.Activated:Connect(destroy)
 env.R4NDex = { Destroy = destroy }
 
-showTab("Props")
+-- barra de ventanas (arriba, movible): muestra/oculta cada ventana
+local LW = math.min(500, vp.X - 16)
+local launch = new("Frame", {
+	Size = UDim2.fromOffset(LW, 24), Position = UDim2.fromOffset(math.floor((vp.X - LW) / 2), 4),
+	BackgroundColor3 = C.title, BorderSizePixel = 0, ZIndex = 100000,
+}, gui)
+stroke(launch, C.line)
+local lh = text(launch, "◆ R4N", { Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(50, 24), Font = FONTB, TextColor3 = C.accent2, ZIndex = 100001 })
+makeDraggable(lh, function() return launch.Position end, function(sp, dx, dy)
+	launch.Position = UDim2.new(sp.X.Scale, sp.X.Offset + dx, sp.Y.Scale, sp.Y.Offset + dy)
+end)
+local lstrip = new("ScrollingFrame", {
+	Position = UDim2.fromOffset(60, 2), Size = UDim2.new(1, -64, 1, -4), BackgroundTransparency = 1, BorderSizePixel = 0,
+	ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X, ZIndex = 100001,
+}, launch)
+hlist(lstrip, 3)
+for _, key in ipairs({ "Explorer", "Properties", "Script", "Remotes", "Console", "Tools" }) do
+	local label = key == "Script" and "Script Viewer" or key
+	button(lstrip, label, function()
+		local f = windows[key].frame
+		if f.Visible then f.Visible = false else showTab(key) end
+	end, { TextSize = 13, ZIndex = 100002 })
+end
+button(lstrip, "✕", destroy, { TextSize = 13, BackgroundColor3 = Color3.fromRGB(120, 40, 55), ZIndex = 100002 })
+
+-- estado inicial
+showTab("Explorer")
+showTab("Properties")
 rebuild()
 render()
-notify("R4N Dex listo · RightShift para ocultar", "good")
+notify("R4N Dex listo · RightShift para ocultar · click derecho = menú", "good")
