@@ -1,11 +1,13 @@
 --[[
-	R4N DEX v1.1 — remake de Dex Explorer (estilo clásico gris oscuro)
-	Ventanas: Explorer · Properties · Script Viewer · Remote Spy · Console · Tools
-	Visor de scripts renovado: varios métodos de obtención + resaltado de sintaxis + scroll virtual
-	Click derecho en el Explorer = menú contextual · Doble click en un script = abrirlo
-	Tecla: RightShift = mostrar/ocultar todo
+	R4N Explorer v2.0 — by cheswer
+	Explorer · Properties · Script Viewer · Deep Search · Remote Spy · Console · Tools
+	· Iconos por clase · Pantalla de carga · Lista de scripts (Todos / Local / Módulos / Server / nil)
+	· Blacklist activable de scripts por defecto de Roblox (botón 🛡 en el Explorer)
+	· Dumper v2: decompile + require() + env + closures + upvalues + constantes + GC
+	· Deep Search: busca dentro del código de TODOS los scripts, constantes, nombres, valores y memoria
+	· Buscador dentro del Script Viewer (Ctrl+F)  ·  Ctrl+Shift+F = Deep Search  ·  RightShift = mostrar/ocultar
+	Blacklist extra: getgenv().R4N_Blacklist = { "MiScript", "Game.Carpeta" }
 ]]
-
 local cloneref = cloneref or function(o) return o end
 local function S(n) return cloneref(game:GetService(n)) end
 
@@ -15,7 +17,62 @@ local Workspace = S("Workspace")
 local LP = Players.LocalPlayer
 local env = (getgenv or function() return _G end)()
 
-if env.R4NDex and env.R4NDex.Destroy then pcall(env.R4NDex.Destroy) end
+if env.R4NExplorer and env.R4NExplorer.Destroy then pcall(env.R4NExplorer.Destroy) end
+
+----------------------------------------------------------------
+-- Configuración global + blacklist de scripts por defecto de Roblox
+----------------------------------------------------------------
+local X = {
+	cfg = { blacklist = true },
+	favs = {},
+	srcCache = setmetatable({}, { __mode = "k" }),
+	constCache = setmetatable({}, { __mode = "k" }),
+}
+do
+	local BL_ANCESTORS = {}
+	for n in ([[PlayerModule PlayerScriptsLoader RbxCharacterSounds ChatScript ChatMain BubbleChat ChatServiceRunner
+		ChatModules ClientChatModules ChatLocalization TopBarApp BackpackScript PlayerListScript EmotesMenu
+		ControlScript CameraScript]]):gmatch("[%w_]+") do
+		BL_ANCESTORS[n] = true
+	end
+	local BL_SERVICES = { CoreGui = true, CorePackages = true, Chat = true, RobloxPluginGuiService = true }
+	local cache = setmetatable({}, { __mode = "k" })
+
+	local function compute(inst)
+		local p, d = inst, 0
+		while p and p ~= game and d < 80 do
+			if BL_ANCESTORS[p.Name] and p:IsA("LuaSourceContainer") then return true end
+			local par = p.Parent
+			if par == game and BL_SERVICES[p.ClassName] then return true end
+			p, d = par, d + 1
+		end
+		if inst:IsA("LuaSourceContainer") and not inst:IsA("ModuleScript") then
+			local n, par = inst.Name, inst.Parent
+			if n == "Animate" and (inst:FindFirstChild("walk") or inst:FindFirstChild("run")) then return true end
+			if par and (n == "Health" or n == "Sound") and par:FindFirstChildOfClass("Humanoid") then return true end
+		end
+		return false
+	end
+
+	X.isDefault = function(inst)
+		local c = cache[inst]
+		if c ~= nil then return c end
+		local ok, res = pcall(compute, inst)
+		res = ok and res or false
+		if not res and type(env.R4N_Blacklist) == "table" then
+			local okn, full = pcall(inst.GetFullName, inst)
+			full = (okn and full or inst.Name):lower()
+			for _, s in ipairs(env.R4N_Blacklist) do
+				if type(s) == "string" and s ~= "" and full:find(s:lower(), 1, true) then res = true break end
+			end
+		end
+		cache[inst] = res
+		return res
+	end
+	X.clearBlCache = function() for k in pairs(cache) do cache[k] = nil end end
+	X.skip = function(inst) return X.cfg.blacklist and X.isDefault(inst) end
+	X.escRT = function(s) return (tostring(s):gsub("[&<>\"']", { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;", ['"'] = "&quot;", ["'"] = "&apos;" })) end
+end
 
 ----------------------------------------------------------------
 -- Estado global / utilidades
@@ -56,7 +113,7 @@ local function getGuiParent()
 end
 local parentGui = getGuiParent()
 for _, o in ipairs(parentGui:GetChildren()) do
-	if o.Name == "R4NDex" then pcall(function() o:Destroy() end) end
+	if o.Name == "R4NExplorer" then pcall(function() o:Destroy() end) end
 end
 
 local function new(class, props, parent)
@@ -193,33 +250,318 @@ local function getPath(i)
 	return s
 end
 
-local function ser(v, depth, seen)
-	depth, seen = depth or 0, seen or {}
-	local t = typeof(v)
-	if t == "string" then return ("%q"):format(v)
-	elseif t == "number" or t == "boolean" or t == "nil" then return tostring(v)
-	elseif t == "Instance" then return getPath(v)
-	elseif t == "Vector3" then return ("Vector3.new(%s, %s, %s)"):format(v.X, v.Y, v.Z)
-	elseif t == "Vector2" then return ("Vector2.new(%s, %s)"):format(v.X, v.Y)
-	elseif t == "CFrame" then return "CFrame.new(" .. table.concat({ v:GetComponents() }, ", ") .. ")"
-	elseif t == "Color3" then return ("Color3.new(%s, %s, %s)"):format(v.R, v.G, v.B)
-	elseif t == "UDim2" then return ("UDim2.new(%s, %s, %s, %s)"):format(v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset)
-	elseif t == "EnumItem" then return tostring(v)
-	elseif t == "BrickColor" then return ('BrickColor.new("%s")'):format(v.Name)
-	elseif t == "table" then
-		if depth > 4 or seen[v] then return "{...}" end
-		seen[v] = true
-		local out = {}
-		for k, val in pairs(v) do
-			local ks = (type(k) == "string" and k:match("^[%a_][%w_]*$")) and k or ("[" .. ser(k, depth + 1, seen) .. "]")
-			out[#out + 1] = string.rep("  ", depth + 1) .. ks .. " = " .. ser(val, depth + 1, seen)
-			if #out >= 250 then out[#out + 1] = string.rep("  ", depth + 1) .. "-- ... (recortado)"; break end
+-- serializador / dumper v2 (antes: funciones y userdata salían como "nil --[[function]]") ------------------
+local ser
+do
+	local LUAKW = {}
+	for w in ("and break do else elseif end false for function if in local nil not or repeat return then true until while continue"):gmatch("%a+") do LUAKW[w] = true end
+	local ESCMAP = { ["\\"] = "\\\\", ['"'] = '\\"', ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }
+	local function qstr(s)
+		local r = s:gsub('[%c\\"]', function(c) return ESCMAP[c] or ("\\%03d"):format(c:byte()) end)
+		if not utf8.len(r) then
+			r = r:gsub("[\128-\255]", function(c) return ("\\%03d"):format(c:byte()) end)
 		end
-		seen[v] = nil
-		if #out == 0 then return "{}" end
-		return "{\n" .. table.concat(out, ",\n") .. "\n" .. string.rep("  ", depth) .. "}"
+		return '"' .. r .. '"'
 	end
-	return "nil --[[" .. t .. "]]"
+	local function qnum(n)
+		if n ~= n then return "(0/0)" end
+		if n == math.huge then return "math.huge" end
+		if n == -math.huge then return "-math.huge" end
+		if n == math.floor(n) and math.abs(n) < 1e15 then return ("%d"):format(n) end
+		return (("%.10g"):format(n))
+	end
+	local function cm(s) return "--[=[ " .. (tostring(s):gsub("%]=%]", "] =]")) .. " ]=]" end
+	local function isIdent(k) return type(k) == "string" and k:match("^[%a_][%w_]*$") ~= nil and not LUAKW[k] end
+	local RANK = { number = 1, string = 2, boolean = 3 }
+	local function keyOrder(a, b)
+		local ta, tb = type(a), type(b)
+		if ta == "number" and tb == "number" then return a < b end
+		local ra, rb = RANK[ta] or 9, RANK[tb] or 9
+		if ra ~= rb then return ra < rb end
+		return tostring(a) < tostring(b)
+	end
+
+	local function fnInfo(f)
+		local info = { name = "", src = "", line = -1, params = -1, vararg = false, kind = "Lua" }
+		pcall(function()
+			if debug.info then
+				local s, l, n, a, v = debug.info(f, "slna")
+				info.src, info.line, info.name = s or "", l or -1, n or ""
+				info.params, info.vararg = a or -1, v and true or false
+			end
+		end)
+		if (info.src == "" or info.line == -1) and debug.getinfo then
+			pcall(function()
+				local t = debug.getinfo(f)
+				info.src = t.source or t.short_src or info.src
+				info.line = t.linedefined or t.currentline or info.line
+				if t.name and t.name ~= "" then info.name = t.name end
+				info.params = t.numparams or t.nparams or info.params
+				if t.is_vararg == 1 or t.is_vararg == true then info.vararg = true end
+			end)
+		end
+		pcall(function()
+			if iscclosure and iscclosure(f) then info.kind = "C"
+			elseif isexecutorclosure and isexecutorclosure(f) then info.kind = "executor" end
+		end)
+		if type(info.line) ~= "number" then info.line = -1 end
+		if type(info.params) ~= "number" then info.params = -1 end
+		return info
+	end
+
+	local function constList(f, maxN)
+		local out = {}
+		if not (debug and debug.getconstants) then return out end
+		local ok, cs = pcall(debug.getconstants, f)
+		if not ok or type(cs) ~= "table" then return out end
+		local keys = {}
+		for k in pairs(cs) do if type(k) == "number" then keys[#keys + 1] = k end end
+		table.sort(keys)
+		for _, k in ipairs(keys) do
+			local v, tv = cs[k], type(cs[k])
+			if tv == "string" then
+				out[#out + 1] = qstr(#v > 60 and (v:sub(1, 60) .. "…") or v)
+			elseif tv == "number" then
+				out[#out + 1] = qnum(v)
+			end
+			if maxN and #out >= maxN then break end
+		end
+		return out
+	end
+
+	local function instRef(v)
+		local okd, desc = pcall(function() return v:IsDescendantOf(game) end)
+		if okd and desc then return getPath(v) end
+		if v == game then return "game" end
+		local okn, nm = pcall(function() return v.ClassName .. " " .. qstr(v.Name) end)
+		return "nil --[[Instance sin padre: " .. ((okn and nm or "?"):gsub("%]%]", "] ]")) .. "]]"
+	end
+
+	local go
+	local function fnText(f, o)
+		local i = fnInfo(f)
+		local ps = {}
+		for n = 1, math.max(0, i.params) do ps[n] = "p" .. n end
+		if i.vararg then ps[#ps + 1] = "..." end
+		local meta = { i.kind .. " function" }
+		if i.name ~= "" then meta[#meta + 1] = "name: " .. i.name end
+		if i.line >= 0 then meta[#meta + 1] = "line " .. i.line end
+		if i.src ~= "" then meta[#meta + 1] = (i.src:gsub("^@", "")) end
+		if o.fnDetail then
+			local cs = constList(f, 8)
+			if #cs > 0 then meta[#meta + 1] = "consts: " .. table.concat(cs, ", ") end
+			if debug.getupvalues then
+				local ok, ups = pcall(debug.getupvalues, f)
+				if ok and type(ups) == "table" then
+					local n = 0
+					for _ in pairs(ups) do n += 1 end
+					if n > 0 then meta[#meta + 1] = n .. " upvalues" end
+				end
+			end
+		end
+		return ("function(%s) end %s"):format(table.concat(ps, ", "), cm(table.concat(meta, " · ")))
+	end
+
+	local function tableText(v, depth, o, stack, path)
+		local ind, ind0 = string.rep("\t", depth + 1), string.rep("\t", depth)
+		local out, count, mark, len = {}, 0, {}, 0
+		pcall(function() len = #v end)
+		for i = 1, len do
+			if count >= o.maxEntries then break end
+			local val = rawget(v, i)
+			if val == nil then break end
+			mark[i] = true
+			count += 1
+			out[#out + 1] = ind .. go(val, depth + 1, o, stack, path .. "[" .. i .. "]")
+		end
+		local keys = {}
+		for k in next, v do
+			if not mark[k] then keys[#keys + 1] = k end
+		end
+		table.sort(keys, keyOrder)
+		for _, k in ipairs(keys) do
+			if count >= o.maxEntries then
+				out[#out + 1] = ind .. "-- ... (más entradas recortadas)"
+				break
+			end
+			count += 1
+			local ks, kpath
+			if isIdent(k) then
+				ks, kpath = k, path .. "." .. k
+			else
+				ks = "[" .. go(k, depth + 1, o, stack, path .. ".<clave>") .. "]"
+				kpath = path .. "[" .. (type(k) == "string" and qstr(k) or tostring(k)) .. "]"
+			end
+			out[#out + 1] = ind .. ks .. " = " .. go(rawget(v, k), depth + 1, o, stack, kpath)
+		end
+		if #out == 0 then return "{}" end
+		return "{\n" .. table.concat(out, ",\n") .. "\n" .. ind0 .. "}"
+	end
+
+	go = function(v, depth, o, stack, path)
+		o.nodes += 1
+		if o.nodes > o.maxNodes then return "nil --[[recortado: demasiados nodos]]" end
+		local t = typeof(v)
+		if t == "string" then
+			if #v > o.maxStr then return qstr(v:sub(1, o.maxStr)) .. " --[[+" .. (#v - o.maxStr) .. " bytes]]" end
+			return qstr(v)
+		elseif t == "number" then return qnum(v)
+		elseif t == "boolean" or t == "nil" then return tostring(v)
+		elseif t == "table" then
+			if stack[v] then return "nil --[[ciclo → " .. stack[v] .. "]]" end
+			if depth >= o.maxDepth then
+				local n = 0
+				pcall(function() for _ in next, v do n += 1 if n >= 999 then break end end end)
+				return "{} --[[... " .. n .. " entradas (profundidad máx.)]]"
+			end
+			stack[v] = (path == "" and "<raíz>" or path)
+			local okb, body = pcall(tableText, v, depth, o, stack, path)
+			stack[v] = nil
+			if not okb then return "nil --[[error leyendo tabla: " .. tostring(body):sub(1, 80) .. "]]" end
+			if o.metatables then
+				local mt
+				pcall(function() mt = (getrawmetatable or getmetatable)(v) end)
+				if type(mt) == "table" then
+					body = "setmetatable(" .. body .. ", " .. go(mt, depth + 1, o, stack, path .. ".<mt>") .. ")"
+				end
+			end
+			return body
+		elseif t == "function" then return fnText(v, o)
+		elseif t == "Instance" then return instRef(v)
+		elseif t == "Vector3" then return ("Vector3.new(%s, %s, %s)"):format(qnum(v.X), qnum(v.Y), qnum(v.Z))
+		elseif t == "Vector2" then return ("Vector2.new(%s, %s)"):format(qnum(v.X), qnum(v.Y))
+		elseif t == "Vector3int16" then return ("Vector3int16.new(%d, %d, %d)"):format(v.X, v.Y, v.Z)
+		elseif t == "Vector2int16" then return ("Vector2int16.new(%d, %d)"):format(v.X, v.Y)
+		elseif t == "CFrame" then
+			local c = { v:GetComponents() }
+			for i = 1, #c do c[i] = qnum(c[i]) end
+			return "CFrame.new(" .. table.concat(c, ", ") .. ")"
+		elseif t == "Color3" then
+			return ("Color3.fromRGB(%d, %d, %d)"):format(math.floor(v.R * 255 + 0.5), math.floor(v.G * 255 + 0.5), math.floor(v.B * 255 + 0.5))
+		elseif t == "UDim" then return ("UDim.new(%s, %s)"):format(qnum(v.Scale), qnum(v.Offset))
+		elseif t == "UDim2" then return ("UDim2.new(%s, %s, %s, %s)"):format(qnum(v.X.Scale), qnum(v.X.Offset), qnum(v.Y.Scale), qnum(v.Y.Offset))
+		elseif t == "Rect" then return ("Rect.new(%s, %s, %s, %s)"):format(qnum(v.Min.X), qnum(v.Min.Y), qnum(v.Max.X), qnum(v.Max.Y))
+		elseif t == "NumberRange" then return ("NumberRange.new(%s, %s)"):format(qnum(v.Min), qnum(v.Max))
+		elseif t == "NumberSequence" then
+			local k = {}
+			for _, p in ipairs(v.Keypoints) do k[#k + 1] = ("NumberSequenceKeypoint.new(%s, %s, %s)"):format(qnum(p.Time), qnum(p.Value), qnum(p.Envelope)) end
+			return "NumberSequence.new({" .. table.concat(k, ", ") .. "})"
+		elseif t == "ColorSequence" then
+			local k = {}
+			for _, p in ipairs(v.Keypoints) do k[#k + 1] = ("ColorSequenceKeypoint.new(%s, %s)"):format(qnum(p.Time), go(p.Value, depth, o, stack, path)) end
+			return "ColorSequence.new({" .. table.concat(k, ", ") .. "})"
+		elseif t == "BrickColor" then return ("BrickColor.new(%s)"):format(qstr(v.Name))
+		elseif t == "EnumItem" then return tostring(v)
+		elseif t == "Enum" then return "Enum." .. tostring(v)
+		elseif t == "Enums" then return "Enum"
+		elseif t == "TweenInfo" then
+			return ("TweenInfo.new(%s, %s, %s, %s, %s, %s)"):format(qnum(v.Time), tostring(v.EasingStyle), tostring(v.EasingDirection), qnum(v.RepeatCount), tostring(v.Reverses), qnum(v.DelayTime))
+		elseif t == "Ray" then return ("Ray.new(%s, %s)"):format(go(v.Origin, depth, o, stack, path), go(v.Direction, depth, o, stack, path))
+		elseif t == "PhysicalProperties" then
+			return ("PhysicalProperties.new(%s, %s, %s, %s, %s)"):format(qnum(v.Density), qnum(v.Friction), qnum(v.Elasticity), qnum(v.FrictionWeight), qnum(v.ElasticityWeight))
+		elseif t == "Font" then return ("Font.new(%s)"):format(qstr(tostring(v.Family)))
+		elseif t == "DateTime" then return ("DateTime.fromUnixTimestampMillis(%s)"):format(qnum(v.UnixTimestampMillis))
+		elseif t == "buffer" then
+			local okb, n = pcall(buffer.len, v)
+			if okb and n <= 512 then
+				local oks, s = pcall(buffer.readstring, v, 0, n)
+				if oks then return "buffer.fromstring(" .. qstr(s) .. ")" end
+			end
+			return "nil --[[buffer de " .. tostring(okb and n or "?") .. " bytes]]"
+		elseif t == "RBXScriptSignal" or t == "RBXScriptConnection" then return "nil --[[" .. t .. "]]"
+		elseif t == "thread" then return "nil --[[thread]]"
+		end
+		local okt, s = pcall(tostring, v)
+		return "nil --[[" .. t .. ": " .. ((okt and s or "?"):gsub("%]%]", "] ]")) .. "]]"
+	end
+
+	ser = function(v, depth, seen, opts)
+		if type(depth) == "table" then opts = depth end
+		local o = { maxDepth = 6, maxEntries = 300, maxNodes = 15000, maxStr = 3000, nodes = 0, fnDetail = false, metatables = true }
+		for k, val in pairs(opts or {}) do o[k] = val end
+		local ok, res = pcall(go, v, 0, o, {}, "")
+		return ok and res or ("nil --[[error al serializar: " .. tostring(res) .. "]]")
+	end
+
+	-- informe de un closure: info, upvalues (con valores), constantes y funciones internas
+	local function describe(f, label, depth, state)
+		state = state or { n = 0 }
+		depth = depth or 0
+		state.n += 1
+		if state.n > 400 then return "" end
+		local ind = string.rep("  ", depth)
+		local i = fnInfo(f)
+		local out = {}
+		out[#out + 1] = ("%s-- %s%s · %s · línea %s · %d param%s"):format(
+			ind, label or "función", i.name ~= "" and (" «" .. i.name .. "»") or "", i.kind, tostring(i.line),
+			math.max(i.params, 0), i.vararg and " (+...)" or "")
+		if debug.getupvalues then
+			local ok, ups = pcall(debug.getupvalues, f)
+			if ok and type(ups) == "table" then
+				local ks = {}
+				for k in pairs(ups) do ks[#ks + 1] = k end
+				table.sort(ks, keyOrder)
+				for n, k in ipairs(ks) do
+					if n > 40 then out[#out + 1] = ind .. "--   (más upvalues…)" break end
+					local sv = ser(ups[k], { maxDepth = 2, maxEntries = 20, maxNodes = 300 }):gsub("%s*\n%s*", " ")
+					out[#out + 1] = ind .. "--   upvalue[" .. tostring(k) .. "] = " .. sv
+				end
+			end
+		end
+		local cs = constList(f, 150)
+		if #cs > 0 then
+			local line = ind .. "--   constantes: "
+			for _, c in ipairs(cs) do
+				if #line + #c > 150 then
+					out[#out + 1] = line
+					line = ind .. "--     "
+				end
+				line = line .. c .. ", "
+			end
+			out[#out + 1] = line
+		end
+		if depth < 4 and debug.getprotos then
+			local okp, ps = pcall(debug.getprotos, f)
+			if okp and type(ps) == "table" then
+				for idx, p in ipairs(ps) do
+					if type(p) == "function" then
+						local sub = describe(p, "función interna #" .. idx, depth + 1, state)
+						if sub ~= "" then out[#out + 1] = sub end
+					end
+				end
+			end
+		end
+		return table.concat(out, "\n")
+	end
+
+	X.qstr, X.qnum, X.fnInfo, X.constList, X.describe, X.keyOrder = qstr, qnum, fnInfo, constList, describe, keyOrder
+	X.ciPattern = function(p)
+		local out, i, n = {}, 1, #p
+		while i <= n do
+			local c = p:sub(i, i)
+			if c == "%" then
+				out[#out + 1] = p:sub(i, i + 1)
+				i += 2
+			elseif c == "[" then
+				local j = i + 1
+				if p:sub(j, j) == "^" then j += 1 end
+				if p:sub(j, j) == "]" then j += 1 end
+				while j <= n and p:sub(j, j) ~= "]" do
+					if p:sub(j, j) == "%" then j += 1 end
+					j += 1
+				end
+				out[#out + 1] = p:sub(i, j)
+				i = j + 1
+			elseif c:match("%a") then
+				out[#out + 1] = "[" .. c:lower() .. c:upper() .. "]"
+				i += 1
+			else
+				out[#out + 1] = c
+				i += 1
+			end
+		end
+		return table.concat(out)
+	end
 end
 
 local function copy(str)
@@ -232,9 +574,75 @@ end
 -- Sistema de ventanas (como el Dex original: ventanas independientes)
 ----------------------------------------------------------------
 local gui = new("ScreenGui", {
-	Name = "R4NDex", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	Name = "R4NExplorer", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 	DisplayOrder = 999, IgnoreGuiInset = true,
 }, parentGui)
+
+-- pantalla de carga (estilo Dex, pero R4N) -------------------------------------------------------------
+X.splash = (function()
+	local TweenService = S("TweenService")
+	local W = math.min(400, (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.X or 800) - 24)
+	local root = new("CanvasGroup", {
+		Name = "Splash", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(12, 12, 16),
+		BackgroundTransparency = 0.18, BorderSizePixel = 0, ZIndex = 1000000, Active = true, GroupTransparency = 1,
+	}, gui)
+	local card = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(W, 236),
+		BackgroundColor3 = Color3.fromRGB(24, 24, 30), BorderSizePixel = 0,
+	}, root)
+	new("UICorner", { CornerRadius = UDim.new(0, 12) }, card)
+	new("UIStroke", { Color = C.accent2, Thickness = 1.5, Transparency = 0.25 }, card)
+	new("UIGradient", {
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(190, 200, 230)), Rotation = 90,
+	}, card)
+	text(card, "R4N", { Position = UDim2.fromOffset(0, 14), Size = UDim2.new(1, 0, 0, 64), Font = Enum.Font.GothamBlack, TextSize = 58, TextColor3 = C.accent2, TextXAlignment = Enum.TextXAlignment.Center })
+	text(card, "E X P L O R E R", { Position = UDim2.fromOffset(0, 80), Size = UDim2.new(1, 0, 0, 22), Font = Enum.Font.GothamBold, TextSize = 17, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Center })
+	text(card, "by cheswer  ·  v2.0", { Position = UDim2.fromOffset(0, 104), Size = UDim2.new(1, 0, 0, 18), TextSize = 14, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center })
+	local track = new("Frame", { Position = UDim2.new(0, 24, 0, 136), Size = UDim2.new(1, -48, 0, 6), BackgroundColor3 = Color3.fromRGB(48, 48, 58), BorderSizePixel = 0 }, card)
+	new("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+	local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.accent2, BorderSizePixel = 0 }, track)
+	new("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+	local msg = text(card, "Iniciando…", { Position = UDim2.fromOffset(0, 148), Size = UDim2.new(1, 0, 0, 18), TextSize = 14, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center })
+	local caps = text(card, "", { Position = UDim2.fromOffset(14, 172), Size = UDim2.new(1, -28, 0, 56), TextSize = 13, TextColor3 = Color3.fromRGB(140, 150, 175), TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, RichText = true })
+
+	local sp = {}
+	function sp.set(p, m)
+		pcall(function()
+			msg.Text = m
+			TweenService:Create(fill, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { Size = UDim2.fromScale(p, 1) }):Play()
+		end)
+	end
+	function sp.run()
+		task.spawn(function()
+			pcall(function() TweenService:Create(root, TweenInfo.new(0.25), { GroupTransparency = 0 }):Play() end)
+			local names = { "decompile", "getscriptbytecode", "getscriptclosure", "getsenv", "getgc", "getscripts", "getloadedmodules", "getnilinstances", "hookmetamethod", "writefile", "setclipboard" }
+			local parts, okN = {}, 0
+			for _, n in ipairs(names) do
+				local has = env[n] ~= nil
+				if has then okN += 1 end
+				parts[#parts + 1] = ('<font color="%s">%s %s</font>'):format(has and "#5acd82" or "#eb5050", has and "✔" or "✖", n)
+			end
+			sp.set(0.15, "Detectando executor…")
+			task.wait(0.35)
+			caps.Text = table.concat(parts, "   ")
+			sp.set(0.45, ("Funciones disponibles: %d/%d"):format(okN, #names))
+			task.wait(0.45)
+			sp.set(0.75, "Construyendo Explorer · Properties · Script Viewer…")
+			task.wait(0.45)
+			sp.set(0.92, "Preparando Deep Search y blacklist…")
+			task.wait(0.4)
+			sp.set(1, "¡Listo!")
+			task.wait(0.35)
+			pcall(function()
+				local tw = TweenService:Create(root, TweenInfo.new(0.4), { GroupTransparency = 1 })
+				tw:Play()
+				tw.Completed:Wait()
+			end)
+			pcall(function() root:Destroy() end)
+		end)
+	end
+	return sp
+end)()
 
 local cam = Workspace.CurrentCamera
 local vp = cam and cam.ViewportSize or Vector2.new(1000, 600)
@@ -327,14 +735,13 @@ local ex = addWindow("Explorer", "Explorer", PX, TOP, PW, EH, 240, 200)
 
 local searchBox = new("TextBox", {
 	Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 0, 22), BackgroundColor3 = C.btn, TextColor3 = C.text,
-	PlaceholderText = "Filter workspace  (c:Clase para buscar por clase)", PlaceholderColor3 = Color3.fromRGB(110, 110, 110),
+	PlaceholderText = "Filtrar  (c:Clase · s:texto + Enter = buscar en el código)", PlaceholderColor3 = Color3.fromRGB(110, 110, 110),
 	Text = "", Font = FONT, TextSize = 14, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
 }, ex)
 stroke(searchBox, C.line)
 padding(searchBox, 6, 0, 6, 0)
 
-local rootStrip = new("Frame", { Position = UDim2.fromOffset(4, 30), Size = UDim2.new(1, -8, 0, 20), BackgroundTransparency = 1 }, ex)
-hlist(rootStrip, 3)
+local rootStrip = toolbar(ex, 30)
 
 local list = new("ScrollingFrame", {
 	Position = UDim2.fromOffset(4, 54), Size = UDim2.new(1, -8, 1, -54 - 48), BackgroundColor3 = C.bg, BorderSizePixel = 0,
@@ -364,41 +771,114 @@ local searchText = ""
 local rows = {}
 local render, rebuild, selectInst, buildProps, loadScript, reveal, setRoot, openMenu
 
+-- lista de TODOS los scripts (getscripts + módulos cargados + descendientes + nil), con caché de 6 s
+X.scriptCache = { t = -1e9, list = {} }
+X.collectScripts = function(force)
+	local scriptCache = X.scriptCache
+	if not force and os.clock() - scriptCache.t < 6 then return scriptCache.list end
+	local t, seen = {}, {}
+	local function add(s)
+		if typeof(s) == "Instance" and not seen[s] then
+			seen[s] = true
+			t[#t + 1] = s
+		end
+	end
+	if getscripts then pcall(function() for _, s in ipairs(getscripts()) do add(s) end end) end
+	if getloadedmodules then pcall(function() for _, s in ipairs(getloadedmodules()) do add(s) end end) end
+	pcall(function()
+		for _, d in ipairs(game:GetDescendants()) do
+			if d:IsA("LuaSourceContainer") then add(d) end
+		end
+	end)
+	if getnilinstances then
+		pcall(function()
+			for _, d in ipairs(getnilinstances()) do
+				if d:IsA("LuaSourceContainer") then add(d) end
+			end
+		end)
+	end
+	scriptCache.t, scriptCache.list = os.clock(), t
+	return t
+end
+X.isClient = function(s)
+	if s:IsA("LocalScript") then return true end
+	local ok, rc = pcall(function() return s:IsA("Script") and s.RunContext == Enum.RunContext.Client end)
+	return ok and rc == true
+end
+X.scriptsRoot = function(filter)
+	return function(force)
+		local out = {}
+		for _, s in ipairs(X.collectScripts(force)) do
+			if not X.skip(s) and filter(s) then out[#out + 1] = s end
+		end
+		return out
+	end
+end
 local roots = {
 	{ "game", function() return game:GetChildren() end },
 	{ "nil", function() return getnilinstances and getnilinstances() or {} end },
-	{ "Scripts", function()
-		local t, seen = {}, {}
-		local function addAll(arr)
-			for _, s in ipairs(arr) do
-				if not seen[s] then seen[s] = true t[#t + 1] = s end
-			end
-		end
-		if getscripts then pcall(function() addAll(getscripts()) end) end
-		if getloadedmodules then pcall(function() addAll(getloadedmodules()) end) end
+	{ "★ Favoritos", function()
+		local t = {}
+		for i in pairs(X.favs) do t[#t + 1] = i end
 		return t
-	end },
+	end, paths = true },
+	{ "Scripts", X.scriptsRoot(function() return true end), paths = true, scripts = true },
+	{ "Local", X.scriptsRoot(X.isClient), paths = true, scripts = true },
+	{ "Módulos", X.scriptsRoot(function(s) return s:IsA("ModuleScript") end), paths = true, scripts = true },
+	{ "Server", X.scriptsRoot(function(s) return s:IsA("Script") and not X.isClient(s) end), paths = true, scripts = true },
 }
 local currentRoot = roots[1]
 
-local BADGES = {
-	{ "Folder", "F", Color3.fromRGB(240, 190, 70) }, { "Model", "M", Color3.fromRGB(86, 182, 255) },
-	{ "BasePart", "P", Color3.fromRGB(120, 130, 160) }, { "LocalScript", "L", Color3.fromRGB(80, 214, 140) },
-	{ "ModuleScript", "m", Color3.fromRGB(70, 190, 190) }, { "BaseScript", "S", Color3.fromRGB(80, 214, 140) },
-	{ "RemoteEvent", "E", Color3.fromRGB(255, 130, 90) }, { "RemoteFunction", "f", Color3.fromRGB(255, 130, 90) },
-	{ "BindableEvent", "b", Color3.fromRGB(255, 160, 110) }, { "GuiObject", "U", Color3.fromRGB(190, 120, 255) },
-	{ "LayerCollector", "G", Color3.fromRGB(190, 120, 255) }, { "ValueBase", "V", Color3.fromRGB(255, 120, 190) },
-	{ "Humanoid", "H", Color3.fromRGB(255, 96, 110) }, { "Light", "i", Color3.fromRGB(255, 230, 120) },
-	{ "Sound", "♪", Color3.fromRGB(120, 200, 255) }, { "ProximityPrompt", "?", Color3.fromRGB(255, 196, 82) },
-	{ "ClickDetector", "c", Color3.fromRGB(255, 196, 82) }, { "Camera", "C", Color3.fromRGB(150, 150, 200) },
-	{ "Attachment", "a", Color3.fromRGB(150, 150, 170) }, { "Player", "J", Color3.fromRGB(86, 182, 255) },
+do
+local SERVICE_ICONS = {
+	Workspace = "🌍", Players = "👥", Lighting = "💡", ReplicatedStorage = "📦", ReplicatedFirst = "⚡",
+	ServerScriptService = "🖥", ServerStorage = "💾", StarterGui = "🎨", StarterPack = "🎒", StarterPlayer = "🏃",
+	SoundService = "🔊", Teams = "🚩", Chat = "💬", CoreGui = "⚙", TextChatService = "💬", HttpService = "🌐",
+	RunService = "⏱", UserInputService = "🎮", TweenService = "🎞", MarketplaceService = "🛒", Debris = "🗑",
+	Stats = "📊", CollectionService = "🏷", PhysicsService = "🧲", LocalizationService = "🈯", Terrain = "⛰",
 }
-local function badgeFor(inst)
-	if inst.Parent == game then return "◈", Color3.fromRGB(110, 150, 220) end
-	for _, b in ipairs(BADGES) do
-		if inst:IsA(b[1]) then return b[2], b[3] end
-	end
-	return inst.ClassName:sub(1, 1), Color3.fromRGB(100, 100, 120)
+local CLASS_ICONS = {
+	Folder = "📁", Model = "📦", Part = "🧱", MeshPart = "🗿", UnionOperation = "🧊", NegateOperation = "🧊",
+	WedgePart = "📐", CornerWedgePart = "📐", TrussPart = "📐", SpawnLocation = "🚩", Seat = "💺", VehicleSeat = "🚗",
+	Terrain = "⛰", LocalScript = "📜", Script = "📄", ModuleScript = "🧩",
+	RemoteEvent = "📡", RemoteFunction = "📞", UnreliableRemoteEvent = "📶", BindableEvent = "🔔", BindableFunction = "🔕",
+	ScreenGui = "🖥", SurfaceGui = "🖥", BillboardGui = "📋", Frame = "▭", ScrollingFrame = "↕", TextLabel = "🔤",
+	TextButton = "🔘", TextBox = "⌨", ImageLabel = "🌄", ImageButton = "🌄", ViewportFrame = "🔭", CanvasGroup = "▣",
+	Humanoid = "❤", Animator = "🎞", Animation = "🎬", Sound = "🔊", ParticleEmitter = "✨", Beam = "〰", Trail = "〰",
+	Attachment = "📍", Weld = "🔩", WeldConstraint = "🔩", Motor6D = "🦴", Tool = "🔧", Accessory = "🎩", Hat = "🎩",
+	Camera = "🎥", Player = "👤", Team = "🚩", ClickDetector = "🖱", ProximityPrompt = "❓", Sky = "☁",
+	Atmosphere = "🌁", Configuration = "⚙", Highlight = "🔦", Shirt = "👕", Pants = "👖", ForceField = "🛡",
+	Fire = "🔥", Smoke = "💨", Explosion = "💥", Decal = "🌄", Texture = "🌄", SpecialMesh = "🔷", BlockMesh = "🔷",
+	StringValue = "🔠", BoolValue = "☑", ObjectValue = "🔗", Color3Value = "🎨", IntValue = "🔢", NumberValue = "🔢",
+	Vector3Value = "🔢", CFrameValue = "🔢", BrickColorValue = "🎨",
+}
+local ICON_ISA = {
+	{ "LuaSourceContainer", "📜" }, { "BasePart", "🧱" }, { "GuiObject", "▭" }, { "LayerCollector", "🖥" },
+	{ "ValueBase", "🔢" }, { "UIComponent", "📐" }, { "Constraint", "🔗" }, { "JointInstance", "🔩" },
+	{ "Light", "💡" }, { "PostEffect", "🎛" }, { "Clothing", "👕" }, { "BaseRemoteEvent", "📡" },
+	{ "FormFactorPart", "🧱" }, { "Model", "📦" },
+}
+X.icon = function(inst)
+	local ok, ic = pcall(function()
+		local cn = inst.ClassName
+		if inst.Parent == game then return SERVICE_ICONS[cn] or "🔷" end
+		if cn == "Model" and inst:FindFirstChildOfClass("Humanoid") then return "🧍" end
+		local i = CLASS_ICONS[cn]
+		if i then return i end
+		for _, b in ipairs(ICON_ISA) do
+			if inst:IsA(b[1]) then return b[2] end
+		end
+		return "▫"
+	end)
+	return ok and ic or "▫"
+end
+X.iconLegend = function()
+	local t = { "— Leyenda de iconos —", "🌍 Workspace · 👥 Players · 📦 ReplicatedStorage · 🖥 ServerScriptService", "📁 Folder · 📦 Model · 🧍 Model con Humanoid · 🧱 Part · 🗿 MeshPart · 🧊 Union",
+		"📜 LocalScript · 📄 Script · 🧩 ModuleScript", "📡 RemoteEvent · 📞 RemoteFunction · 🔔 BindableEvent · 🔕 BindableFunction",
+		"🖥 ScreenGui · ▭ Frame · 🔤 TextLabel · 🔘 TextButton · ⌨ TextBox · 🌄 Image/Decal", "❤ Humanoid · 🔊 Sound · ✨ Particle · 🔧 Tool · 🎥 Camera · 👤 Player · 🖱 ClickDetector · ❓ Prompt",
+		"🔢 Value (Int/Number/…) · 🔠 StringValue · 🔗 ObjectValue · ☑ BoolValue · 📐 UI/Layout · 🔩 Weld/Joint", "★ = favoritos · 🛡 = blacklist de scripts de Roblox" }
+	return table.concat(t, "\n")
+end
 end
 
 local function kids(inst)
@@ -479,7 +959,7 @@ local function makeRow()
 		AutoButtonColor = false, BorderSizePixel = 0, Visible = false,
 	}, list)
 	local arrow = new("TextButton", { Size = UDim2.fromOffset(16, ROW), BackgroundTransparency = 1, Text = "", TextColor3 = C.dim, Font = FONT, TextSize = 14, AutoButtonColor = false }, row)
-	local badge = new("TextLabel", { Size = UDim2.fromOffset(14, 14), BackgroundColor3 = C.dim, Text = "", TextColor3 = Color3.new(1, 1, 1), Font = FONTB, TextSize = 12, BorderSizePixel = 0 }, row)
+	local badge = new("TextLabel", { Size = UDim2.fromOffset(18, ROW), BackgroundTransparency = 1, Text = "", TextColor3 = Color3.new(1, 1, 1), Font = FONT, TextSize = 14, BorderSizePixel = 0 }, row)
 	local name = text(row, "", { TextTruncate = Enum.TextTruncate.AtEnd })
 	local r = { frame = row, arrow = arrow, badge = badge, name = name, inst = nil, hover = false }
 	row.MouseEnter:Connect(function() r.hover = true paintRow(r) end)
@@ -519,12 +999,19 @@ local function fillRow(r, item, y)
 	r.frame.Position = UDim2.fromOffset(0, y)
 	r.arrow.Position = UDim2.fromOffset(x, 0)
 	r.arrow.Text = hasKids(inst) and (expanded[inst] and "▾" or "▸") or ""
-	r.badge.Position = UDim2.fromOffset(x + 18, 3)
-	local letter, col = badgeFor(inst)
-	r.badge.Text, r.badge.BackgroundColor3 = letter, col
+	r.badge.Position = UDim2.fromOffset(x + 17, 0)
+	r.badge.Text = X.icon(inst)
 	r.name.Position = UDim2.fromOffset(x + 38, 0)
 	r.name.Size = UDim2.new(1, -(x + 42), 1, 0)
-	r.name.Text = inst.Name
+	if (currentRoot.paths or searchText ~= "") and depth == 0 then
+		local pp = "nil"
+		pcall(function() if inst.Parent then pp = inst.Parent:GetFullName() end end)
+		r.name.RichText = true
+		r.name.Text = X.escRT(inst.Name) .. '  <font color="#7a7a7a">' .. X.escRT(pp) .. "</font>"
+	else
+		r.name.RichText = false
+		r.name.Text = inst.Name
+	end
 	r.frame.Visible = true
 	paintRow(r)
 end
@@ -558,10 +1045,28 @@ setRoot = function(r)
 	rebuild()
 	list.CanvasPosition = Vector2.zero
 	render()
+	notify(r[1] .. ": " .. #flat .. " elementos" .. (r.scripts and (X.cfg.blacklist and " · blacklist ON (sin scripts de Roblox)" or " · blacklist OFF (todos)") or ""))
 end
 for _, r in ipairs(roots) do
 	button(rootStrip, r[1], function() setRoot(r) end, { TextSize = 13 })
 end
+local blBtn
+X.setBlacklist = function(on)
+	X.cfg.blacklist = on
+	if blBtn then
+		blBtn.Text = on and "🛡 Blacklist: ON" or "🛡 Blacklist: OFF"
+		blBtn.BackgroundColor3 = on and Color3.fromRGB(30, 100, 60) or C.btn
+		blBtn:SetAttribute("base", blBtn.BackgroundColor3)
+	end
+	if currentRoot.scripts then
+		rebuild()
+		list.CanvasPosition = Vector2.zero
+		render()
+	end
+	notify("Blacklist de scripts de Roblox " .. (on and "ACTIVADA (se omiten chat, UI, PlayerModule…)" or "DESACTIVADA (se muestran todos)"), on and "good" or "warn")
+end
+blBtn = button(rootStrip, "🛡 Blacklist: ON", function() X.setBlacklist(not X.cfg.blacklist) end,
+	{ TextSize = 13, BackgroundColor3 = Color3.fromRGB(30, 100, 60) })
 
 local tok = 0
 connect(searchBox:GetPropertyChangedSignal("Text"), function()
@@ -569,12 +1074,20 @@ connect(searchBox:GetPropertyChangedSignal("Text"), function()
 	local my = tok
 	task.delay(0.25, function()
 		if my == tok and alive then
-			searchText = searchBox.Text
+			searchText = (searchBox.Text:sub(1, 2):lower() == "s:") and "" or searchBox.Text
 			rebuild()
 			list.CanvasPosition = Vector2.zero
 			render()
 		end
 	end)
+end)
+
+searchBox.FocusLost:Connect(function(enter)
+	local t = searchBox.Text
+	if enter and t:sub(1, 2):lower() == "s:" and #t > 2 then
+		searchBox.Text = ""
+		X.openDeep(nil, t:sub(3), true)
+	end
 end)
 
 reveal = function(inst)
@@ -660,6 +1173,12 @@ local function openScript(i)
 	loadScript(i)
 end
 
+X.isScr = function(i) return i:IsA("LuaSourceContainer") end
+X.selectAndReveal = function(i)
+	selectInst(i)
+	reveal(i)
+end
+
 local ACTIONS = {
 	{ "Copiar ruta", function(i) copyN(getPath(i), "Ruta copiada") end },
 	{ "Copiar nombre", function(i) copyN(i.Name, "Nombre copiado") end },
@@ -670,6 +1189,23 @@ local ACTIONS = {
 	{ "Ver script", openScript, when = function(i) return i:IsA("LuaSourceContainer") end },
 	{ "Ir al padre", function(i) if i.Parent then selectInst(i.Parent) reveal(i.Parent) end end, when = function(i) return i.Parent ~= nil end },
 	{ "Expandir / contraer", function(i) toggle(i) end },
+	{ "📊 Dump total (script)", function(i) X.dumpFullView(i) end, when = X.isScr },
+	{ "💾 Guardar script (.lua)", function(i) X.saveScript(i) end, when = X.isScr },
+	{ "💾 Guardar todos los scripts de aquí", function(i) X.dumpAll(i) end },
+	{ "🔎 Buscar dentro (Deep Search)", function(i) X.openDeep(i) end },
+	{ "Copiar ruta corta (FullName)", function(i) copyN(i:GetFullName(), "Ruta copiada") end },
+	{ "★ Favorito (alternar)", function(i)
+		X.favs[i] = (not X.favs[i]) or nil
+		notify(X.favs[i] and "Añadido a ★ Favoritos" or "Quitado de ★ Favoritos", "good")
+	end },
+	{ "Copiar FireServer / InvokeServer", function(i)
+		copyN(getPath(i) .. (i:IsA("RemoteFunction") and ":InvokeServer()" or ":FireServer()"), "Código copiado")
+	end, when = function(i) return i:IsA("BaseRemoteEvent") or i:IsA("RemoteFunction") end },
+	{ "Activar (click / prompt)", function(i)
+		if i:IsA("ClickDetector") and fireclickdetector then pcall(fireclickdetector, i) notify("ClickDetector activado", "good")
+		elseif i:IsA("ProximityPrompt") and fireproximityprompt then pcall(fireproximityprompt, i) notify("ProximityPrompt activado", "good")
+		else notify("Tu executor no soporta esta acción", "bad") end
+	end, when = function(i) return i:IsA("ClickDetector") or i:IsA("ProximityPrompt") end },
 }
 
 -- menú contextual (click derecho) ----------------------------------------------
@@ -701,7 +1237,7 @@ openMenu = function(inst)
 	end
 	local m = UIS:GetMouseLocation()
 	local sz = gui.AbsoluteSize
-	menu.Position = UDim2.fromOffset(math.max(0, math.min(m.X, sz.X - 175)), math.max(0, math.min(m.Y, sz.Y - 215)))
+	menu.Position = UDim2.fromOffset(math.max(0, math.min(m.X, sz.X - 175)), math.max(0, math.min(m.Y, sz.Y - (#menu:GetChildren() * 22 + 8))))
 	menu.Visible = true
 end
 
@@ -715,7 +1251,7 @@ button(actionStrip, "Normal", unview, { TextSize = 13 })
 button(actionStrip, "Script", function()
 	if need() then openScript(selected) end
 end, { TextSize = 13 })
-button(actionStrip, "↻", function() rebuild() render() end, { TextSize = 13 })
+button(actionStrip, "↻", function() X.scriptCache.t = -1e9 rebuild() render() end, { TextSize = 13 })
 
 ----------------------------------------------------------------
 -- Properties
@@ -993,13 +1529,58 @@ for k, c in pairs(SYN) do
 	HEX[k] = ("#%02x%02x%02x"):format(math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
 end
 
-local gutter = new("Frame", { Position = UDim2.fromOffset(4, 30), Size = UDim2.new(0, 40, 1, -30 - 20), BackgroundColor3 = Color3.fromRGB(40, 40, 40), BorderSizePixel = 0, ClipsDescendants = true }, sw)
+local gutter = new("Frame", { Position = UDim2.fromOffset(4, 56), Size = UDim2.new(0, 40, 1, -56 - 20), BackgroundColor3 = Color3.fromRGB(40, 40, 40), BorderSizePixel = 0, ClipsDescendants = true }, sw)
 local codeScroll = new("ScrollingFrame", {
-	Position = UDim2.fromOffset(44, 30), Size = UDim2.new(1, -48, 1, -30 - 20), BackgroundColor3 = C.bg, BorderSizePixel = 0,
+	Position = UDim2.fromOffset(44, 56), Size = UDim2.new(1, -48, 1, -56 - 20), BackgroundColor3 = C.bg, BorderSizePixel = 0,
 	ScrollBarThickness = 10, ScrollBarImageColor3 = C.scroll, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.None,
 	ScrollingDirection = Enum.ScrollingDirection.XY,
 }, sw)
 stroke(codeScroll, C.line)
+
+-- barra de búsqueda dentro del script (Ctrl+F) ------------------------------------------------------
+local F = { hits = {}, byLine = {}, cur = 0, case = false, pat = false, lastQ = "" }
+local runFind, gotoHit, gotoLine, paintFind
+local findBar = toolbar(sw, 30)
+local findBox = new("TextBox", {
+	Size = UDim2.fromOffset(170, 22), BackgroundColor3 = C.btn, TextColor3 = C.text,
+	PlaceholderText = "Buscar en este script…", PlaceholderColor3 = Color3.fromRGB(110, 110, 110),
+	Text = "", Font = FONT, TextSize = 13, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
+}, findBar)
+stroke(findBox, C.line)
+padding(findBox, 6, 0, 6, 0)
+button(findBar, "◀", function() gotoHit(F.cur - 1) end, { TextSize = 13 })
+button(findBar, "▶", function() gotoHit(F.cur + 1) end, { TextSize = 13 })
+local findCount = text(findBar, "", { Size = UDim2.fromOffset(56, 22), TextSize = 13, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center })
+local caseBtn = button(findBar, "Aa", function() F.case = not F.case paintFind() runFind() end, { TextSize = 13 })
+local patBtn = button(findBar, ".*", function() F.pat = not F.pat paintFind() runFind() end, { TextSize = 13 })
+paintFind = function()
+	caseBtn.BackgroundColor3 = F.case and C.accent or C.btn
+	patBtn.BackgroundColor3 = F.pat and C.accent or C.btn
+	caseBtn:SetAttribute("base", caseBtn.BackgroundColor3)
+	patBtn:SetAttribute("base", patBtn.BackgroundColor3)
+end
+local lineBox = new("TextBox", {
+	Size = UDim2.fromOffset(54, 22), BackgroundColor3 = C.btn, TextColor3 = C.text, PlaceholderText = "ir a Ln",
+	PlaceholderColor3 = Color3.fromRGB(110, 110, 110), Text = "", Font = FONT, TextSize = 13, ClearTextOnFocus = true, BorderSizePixel = 0,
+}, findBar)
+stroke(lineBox, C.line)
+lineBox.FocusLost:Connect(function()
+	local n = tonumber(lineBox.Text)
+	if n then gotoLine(n) end
+	lineBox.Text = ""
+end)
+local findTok = 0
+connect(findBox:GetPropertyChangedSignal("Text"), function()
+	findTok += 1
+	local my = findTok
+	task.delay(0.25, function()
+		if my == findTok and alive and findBox.Text ~= F.lastQ then runFind() end
+	end)
+end)
+findBox.FocusLost:Connect(function(enter)
+	if enter then gotoHit(F.cur + 1) end
+end)
+X.focusFind = function() findBox:CaptureFocus() end
 
 local KW = {}
 for w in ("and break do else elseif end for function if in local not or repeat return then until while continue"):gmatch("%a+") do KW[w] = true end
@@ -1115,6 +1696,35 @@ local V = { lines = {}, hl = {}, n = 0, canvasW = 100 }
 local codeRows, numRows = {}, {}
 local lastSource, lastName, curScript, loadTok = "", "script", nil, 0
 
+-- resaltado de coincidencias (cajas amarillas sobre el texto, fuente monoespaciada) ----------------------
+local hitFrames = {}
+local function paintHits(i, ln, cr)
+	local hs = F.byLine[ln]
+	local pool = hitFrames[i]
+	if not hs then
+		if pool then for _, f in ipairs(pool) do f.Visible = false end end
+		return
+	end
+	if not pool then pool = {} hitFrames[i] = pool end
+	for k = 1, math.max(#hs, #pool) do
+		local h, f = hs[k], pool[k]
+		if h and k <= 8 then
+			if not f then
+				f = new("Frame", { BorderSizePixel = 0, ZIndex = 5 }, cr)
+				pool[k] = f
+			end
+			local isCur = F.hits[F.cur] == h
+			f.BackgroundColor3 = isCur and Color3.fromRGB(255, 120, 40) or Color3.fromRGB(255, 198, 0)
+			f.BackgroundTransparency = isCur and 0.4 or 0.72
+			f.Position = UDim2.fromOffset((h.col - 1) * CW, 0)
+			f.Size = UDim2.fromOffset(math.max(h.len * CW, 4), LH)
+			f.Visible = true
+		elseif f then
+			f.Visible = false
+		end
+	end
+end
+
 local function renderCode()
 	local cy = codeScroll.CanvasPosition.Y
 	local viewH = codeScroll.AbsoluteSize.Y
@@ -1138,6 +1748,7 @@ local function renderCode()
 			cr.Size = UDim2.fromOffset(V.canvasW, LH)
 			cr.Position = UDim2.fromOffset(6, (ln - 1) * LH)
 			cr.Text = V.hl[ln] or esc(V.lines[ln])
+			paintHits(i, ln, cr)
 			cr.Visible = true
 			nr.Size = UDim2.new(1, -6, 0, LH)
 			nr.Position = UDim2.fromOffset(0, (ln - 1) * LH - cy)
@@ -1151,6 +1762,72 @@ local function renderCode()
 end
 connect(codeScroll:GetPropertyChangedSignal("CanvasPosition"), renderCode)
 connect(codeScroll:GetPropertyChangedSignal("AbsoluteSize"), renderCode)
+
+gotoLine = function(n)
+	n = math.clamp(math.floor(n), 1, math.max(V.n, 1))
+	local viewH = codeScroll.AbsoluteSize.Y
+	codeScroll.CanvasPosition = Vector2.new(0, math.max(0, (n - 1) * LH - viewH / 2 + LH))
+	renderCode()
+end
+gotoHit = function(k)
+	if #F.hits == 0 then return end
+	k = ((k - 1) % #F.hits) + 1
+	F.cur = k
+	local h = F.hits[k]
+	local viewH, viewW = codeScroll.AbsoluteSize.Y, codeScroll.AbsoluteSize.X
+	local x = ((h.col + h.len) * CW > viewW - 40) and math.max(0, (h.col - 1) * CW - 80) or 0
+	codeScroll.CanvasPosition = Vector2.new(x, math.max(0, (h.ln - 1) * LH - viewH / 2 + LH))
+	findCount.Text = k .. "/" .. #F.hits
+	renderCode()
+end
+runFind = function()
+	F.hits, F.byLine, F.cur = {}, {}, 0
+	local q = findBox.Text
+	F.lastQ = q
+	if q == "" or V.n == 0 then
+		findCount.Text = ""
+		renderCode()
+		return
+	end
+	local needle = q
+	if F.pat then
+		if not F.case then needle = X.ciPattern(q) end
+	elseif not F.case then
+		needle = q:lower()
+	end
+	local bad = false
+	for ln = 1, V.n do
+		local line = V.lines[ln]
+		local subj = (not F.pat and not F.case) and line:lower() or line
+		local init = 1
+		while init <= #subj + 1 do
+			local s, e
+			if F.pat then
+				local ok, a, b = pcall(string.find, subj, needle, init)
+				if not ok then bad = true break end
+				s, e = a, b
+			else
+				s, e = subj:find(needle, init, true)
+			end
+			if not s then break end
+			local h = { ln = ln, col = s, len = math.max(e - s + 1, 1) }
+			F.hits[#F.hits + 1] = h
+			local bl = F.byLine[ln]
+			if not bl then bl = {} F.byLine[ln] = bl end
+			bl[#bl + 1] = h
+			init = math.max(e + 1, s + 1)
+			if #F.hits >= 5000 then break end
+		end
+		if bad or #F.hits >= 5000 then break end
+	end
+	if bad then
+		findCount.Text = "patrón ✖"
+		renderCode()
+		return
+	end
+	findCount.Text = #F.hits == 0 and "0" or ("1/" .. #F.hits)
+	if #F.hits > 0 then gotoHit(1) else renderCode() end
+end
 
 local function setCode(src, info)
 	lastSource = src
@@ -1168,14 +1845,16 @@ local function setCode(src, info)
 	local my = { lines = lines, hl = {}, n = #lines }
 	V = my
 	local gw = math.max(34, #tostring(my.n) * CW + 14)
-	gutter.Size = UDim2.new(0, gw, 1, -30 - 20)
-	codeScroll.Position = UDim2.fromOffset(4 + gw, 30)
-	codeScroll.Size = UDim2.new(1, -(8 + gw), 1, -30 - 20)
+	gutter.Size = UDim2.new(0, gw, 1, -56 - 20)
+	codeScroll.Position = UDim2.fromOffset(4 + gw, 56)
+	codeScroll.Size = UDim2.new(1, -(8 + gw), 1, -56 - 20)
 	my.canvasW = math.max(codeScroll.AbsoluteSize.X, maxLen * CW + 30)
 	codeScroll.CanvasSize = UDim2.fromOffset(my.canvasW, my.n * LH + 10)
 	codeScroll.CanvasPosition = Vector2.zero
 	sInfo.Text = (info or "") .. (info and info ~= "" and " · " or "") .. my.n .. " líneas"
+	F.hits, F.byLine, F.cur = {}, {}, 0
 	renderCode()
+	if findBox.Text ~= "" then task.defer(runFind) end
 	-- resaltado en segundo plano (por tandas para no congelar el juego)
 	task.spawn(function()
 		local st = {}
@@ -1205,6 +1884,7 @@ local function withTimeout(fn, sec)
 	if not done then return false, "tiempo agotado (" .. sec .. "s)" end
 	return ok, res
 end
+X.withTimeout = withTimeout
 
 local function looksFailed(s)
 	if s:match("^%s*$") then return true end
@@ -1214,84 +1894,80 @@ local function looksFailed(s)
 			or h:find("unable to decompile", 1, true) or h:find("cannot decompile", 1, true) then
 			return true
 		end
+		-- algunos decompiladores devuelven un "return nil" vacío cuando no pueden leer el bytecode
+		if h:match("^%s*return%s+nil%s*$") or h:match("^%s*%-%-[^\n]*\n%s*return%s+nil%s*$") then return true end
 	end
 	return false
 end
 
--- último recurso: constantes del bytecode (strings/números/nombres) si no hay decompilador
-local function dumpClosure(inst)
+-- último recurso: informe del bytecode (constantes, upvalues, funciones internas) sin decompilador
+local function dumpClosure(inst, forced)
 	local getc = getscriptclosure or getscriptfunction
-	if not getc or not (debug and debug.getconstants) then return nil end
+	if not getc or not (debug and (debug.getconstants or debug.getupvalues)) then return nil end
 	local ok, f = pcall(getc, inst)
 	if not ok or type(f) ~= "function" then return nil end
-	local out = { "-- No se pudo decompilar. Constantes encontradas en el bytecode (debug.getconstants):" }
-	local seen, total = {}, 0
-	local function walk(fn, depth, label)
-		if depth > 3 or seen[fn] or total > 4000 then return end
-		seen[fn] = true
-		out[#out + 1] = "\n-- " .. string.rep("  ", depth) .. label
-		local okc, cs = pcall(debug.getconstants, fn)
-		if okc and type(cs) == "table" then
-			local keys = {}
-			for k in pairs(cs) do keys[#keys + 1] = k end
-			table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-			for _, k in ipairs(keys) do
-				local v = cs[k]
-				if type(v) == "string" or type(v) == "number" then
-					total += 1
-					out[#out + 1] = string.rep("  ", depth) .. (type(v) == "string" and ("%q"):format(v) or tostring(v))
-				end
-			end
-		end
-		if debug.getprotos then
-			local okp, ps = pcall(debug.getprotos, fn)
-			if okp and type(ps) == "table" then
-				for idx2, p in ipairs(ps) do walk(p, depth + 1, "función #" .. idx2) end
-			end
-		end
-	end
-	walk(f, 0, "principal")
-	return #out > 1 and table.concat(out, "\n") or nil
+	local head = forced and ("-- Informe del bytecode de " .. inst:GetFullName() .. "\n")
+		or "-- No se pudo decompilar. Informe del bytecode (constantes, upvalues y funciones internas):\n"
+	local body = X.describe(f, "principal", 0)
+	return body ~= "" and (head .. body) or nil
 end
 
-local function fetchSource(inst)
+local function fetchSource(inst, force)
+	local c = X.srcCache[inst]
+	if c and not force then return c.src, c.method, c.log end
 	local log = {}
-	local function attempt(name, fn)
-		local ok, r = withTimeout(fn, 12)
+	local function attempt(name, fn, sec)
+		local ok, r = withTimeout(fn, sec or 12)
 		if ok and type(r) == "string" and not looksFailed(r) then return r end
 		local why
 		if not ok then why = tostring(r)
 		elseif type(r) ~= "string" then why = "devolvió " .. type(r)
 		elseif r:match("^%s*$") then why = "vacío"
-		else why = "falló: " .. r:sub(1, 80):gsub("\n", " ") end
+		else why = "falló: " .. (r:sub(1, 80):gsub("%s+", " ")) end
 		log[#log + 1] = name .. " → " .. why
+	end
+	local function done(src, method)
+		X.srcCache[inst] = { src = src, method = method, log = log }
+		return src, method, log
 	end
 	local src
 	if type(decompile) == "function" then
 		src = attempt("decompile()", function() return decompile(inst) end)
-		if src then return src, "decompile()", log end
+		if src then return done(src, "decompile()") end
 	else
 		log[#log + 1] = "decompile() → no existe en tu executor"
 	end
-	src = attempt(".Source", function() return inst.Source end)
-	if src then return src, ".Source", log end
+	src = attempt(".Source", function() return inst.Source end, 4)
+	if src then return done(src, ".Source") end
 	if type(getscriptbytecode) == "function" and type(decompile) == "function" then
 		src = attempt("decompile(bytecode)", function() return decompile(getscriptbytecode(inst)) end)
-		if src then return src, "decompile(bytecode)", log end
+		if src then return done(src, "decompile(bytecode)") end
+	end
+	if type(getscriptclosure) == "function" and type(decompile) == "function" then
+		src = attempt("decompile(closure)", function() return decompile(getscriptclosure(inst)) end)
+		if src then return done(src, "decompile(closure)") end
 	end
 	local okd, dump = pcall(dumpClosure, inst)
-	if okd and dump then return dump, "constantes (sin decompilador)", log end
+	if okd and dump then return done(dump, "constantes (sin decompilador)") end
 	return nil, nil, log
 end
+X.fetch = fetchSource
 
-loadScript = function(inst)
+X.showText = function(txt, info, name)
+	lastName = name or lastName
+	curScript = nil
+	setCode(txt, info)
+end
+
+loadScript = function(inst, after)
 	if not inst or not inst:IsA("LuaSourceContainer") then notify("Selecciona un script", "warn") return end
-	lastName = inst.Name
-	curScript = inst
+	lastName, curScript = inst.Name, inst
 	loadTok += 1
 	local my = loadTok
 	task.spawn(function()
-		setCode("-- obteniendo el código de " .. inst:GetFullName() .. " ...", "cargando")
+		if not X.srcCache[inst] then
+			setCode("-- obteniendo el código de " .. inst:GetFullName() .. " ...", "cargando")
+		end
 		local src, method, log = fetchSource(inst)
 		if my ~= loadTok or not alive then return end
 		if src then
@@ -1304,28 +1980,244 @@ loadScript = function(inst)
 			msg[#msg + 1] = "--"
 			msg[#msg + 1] = "-- Posibles causas: tu executor no soporta decompile(), el script está vacío/sin bytecode"
 			msg[#msg + 1] = "-- (p. ej. un Script de servidor) o el nivel de identidad no permite leer .Source."
-			if inst:IsA("ModuleScript") then msg[#msg + 1] = "-- Es un ModuleScript: prueba el botón «Dump módulo» para ver lo que devuelve." end
+			msg[#msg + 1] = "-- Prueba «Dump total» (require + env + getgc) o «Constantes» para sacar lo que se pueda."
 			setCode(table.concat(msg, "\n"), inst.ClassName .. " " .. inst.Name .. " · sin código")
 			lastSource = ""
+		end
+		if after then pcall(after) end
+	end)
+end
+
+X.openScriptAt = function(inst, line, q, opts)
+	showTab("Script")
+	loadScript(inst, function()
+		if q and q ~= "" then
+			F.case, F.pat = (opts and opts.case) or false, (opts and opts.pat) or false
+			paintFind()
+			findBox.Text = q
+			runFind()
+			local k
+			if line then
+				for i, h in ipairs(F.hits) do
+					if h.ln == line then k = i break end
+				end
+			end
+			if k then gotoHit(k) elseif line then gotoLine(line) end
+		elseif line then
+			gotoLine(line)
 		end
 	end)
 end
 
-button(sBar, "Decompilar", function()
-	local target = (selected and selected:IsA("LuaSourceContainer")) and selected or curScript
-	if target then loadScript(target) else notify("Selecciona un script en el Explorer", "warn") end
-end, { TextSize = 13 })
-button(sBar, "Dump módulo", function()
-	local target = (selected and selected:IsA("ModuleScript")) and selected or curScript
-	if not target or not target:IsA("ModuleScript") then notify("Selecciona un ModuleScript", "warn") return end
+-- rutas de archivo / guardado ---------------------------------------------------------
+local function safeName(s) return (tostring(s):gsub('[<>:"/\\|%?%*%c]', "_")) end
+local function ensureDir(path)
+	if not (makefolder and isfolder) then return end
+	local cur = ""
+	for seg in path:gmatch("[^/]+") do
+		cur = cur == "" and seg or (cur .. "/" .. seg)
+		if not isfolder(cur) then pcall(makefolder, cur) end
+	end
+end
+local function scriptFile(inst, base)
+	local chain, p, d = {}, inst, 0
+	while p and p ~= game and d < 60 do
+		table.insert(chain, 1, safeName(p.Name))
+		p, d = p.Parent, d + 1
+	end
+	if p ~= game then table.insert(chain, 1, "_nil") end
+	local file = table.remove(chain) or "script"
+	return base .. (#chain > 0 and ("/" .. table.concat(chain, "/")) or ""), file
+end
+local function header(inst, method)
+	return ("-- R4N Explorer · %s\n-- %s · método: %s\n\n"):format(getPath(inst), inst.ClassName, tostring(method))
+end
+
+X.saveScript = function(inst)
+	if not writefile then notify("Tu executor no tiene writefile", "bad") return end
+	if not inst or not inst:IsA("LuaSourceContainer") then notify("Selecciona un script", "warn") return end
 	task.spawn(function()
-		local ok, res = pcall(require, target)
-		if ok then
-			lastName = target.Name
-			setCode("return " .. ser(res), "ModuleScript " .. target.Name .. " · require()")
-		else
-			notify("require falló: " .. tostring(res), "bad")
+		local src, method = fetchSource(inst)
+		if not src then notify("No se pudo obtener el código para guardar", "bad") return end
+		local dir, file = scriptFile(inst, "R4NExplorer/Dump_" .. tostring(game.PlaceId))
+		ensureDir(dir)
+		local path = dir .. "/" .. file .. ".lua"
+		local ok = pcall(writefile, path, header(inst, method) .. src)
+		notify(ok and ("Guardado: " .. path) or "Error al guardar", ok and "good" or "bad")
+	end)
+end
+
+local dumpAllBusy = false
+X.dumpAll = function(rootInst)
+	if not writefile then notify("Tu executor no tiene writefile", "bad") return end
+	if dumpAllBusy then notify("Ya hay un volcado en curso", "warn") return end
+	dumpAllBusy = true
+	task.spawn(function()
+		local list = {}
+		for _, s in ipairs(X.collectScripts(true)) do
+			if not X.skip(s) and (not rootInst or s == rootInst or s:IsDescendantOf(rootInst)) then list[#list + 1] = s end
 		end
+		local base = "R4NExplorer/Dump_" .. tostring(game.PlaceId)
+		local used, ok, fail = {}, 0, 0
+		for i, s in ipairs(list) do
+			if not alive then break end
+			if i % 5 == 0 then notify(("Volcando scripts %d/%d …"):format(i, #list), "warn") end
+			local src, method = fetchSource(s)
+			if src then
+				local dir, file = scriptFile(s, base)
+				local path = dir .. "/" .. file
+				used[path] = (used[path] or 0) + 1
+				if used[path] > 1 then path = path .. "_" .. used[path] end
+				ensureDir(dir)
+				if pcall(writefile, path .. ".lua", header(s, method) .. src) then ok += 1 else fail += 1 end
+			else
+				fail += 1
+			end
+			if i % 10 == 0 then task.wait() end
+		end
+		dumpAllBusy = false
+		notify(("Volcado listo: %d guardados · %d sin código → %s/"):format(ok, fail, base), ok > 0 and "good" or "bad")
+	end)
+end
+
+-- DUMP TOTAL: código + require() + entorno + closures + upvalues/constantes + funciones en memoria (GC)
+local function dumpFull(inst)
+	local out = {}
+	local function L(s) out[#out + 1] = s end
+	L("--[[ ═══════ R4N Explorer · DUMP TOTAL ═══════")
+	L(" Ruta      : " .. getPath(inst))
+	L(" FullName  : " .. inst:GetFullName())
+	L(" Clase     : " .. inst.ClassName)
+	pcall(function() if inst:IsA("Script") then L(" RunContext: " .. tostring(inst.RunContext)) end end)
+	pcall(function() if not inst:IsA("ModuleScript") then L(" Disabled  : " .. tostring(inst.Disabled)) end end)
+	if getscriptbytecode then
+		local ok, b = pcall(getscriptbytecode, inst)
+		if ok and type(b) == "string" then L((" Bytecode  : %d bytes"):format(#b)) end
+	end
+	if getscripthash then
+		local ok, h = pcall(getscripthash, inst)
+		if ok and h then L(" Hash      : " .. tostring(h)) end
+	end
+	local okA, attrs = pcall(function() return inst:GetAttributes() end)
+	if okA and type(attrs) == "table" and next(attrs) then L(" Atributos : " .. ser(attrs, { maxDepth = 2 }):gsub("%s*\n%s*", " ")) end
+	L("]]")
+	L("")
+	L("-- ═══════ 1) CÓDIGO ═══════")
+	local src, method, log = fetchSource(inst)
+	if src then
+		L("-- método: " .. method)
+		L(src)
+	else
+		L("-- (sin código) intentos:")
+		for _, l in ipairs(log) do L("--   " .. l) end
+	end
+	if inst:IsA("ModuleScript") then
+		L("")
+		L("-- ═══════ 2) VALOR DEVUELTO POR require() ═══════")
+		local ok, res = withTimeout(function() return require(inst) end, 8)
+		if ok then
+			L("-- tipo: " .. typeof(res))
+			if res == nil then L("-- el módulo no devuelve ningún valor") end
+			L("return " .. ser(res, { maxDepth = 7, maxEntries = 500, maxNodes = 30000, fnDetail = true }))
+		else
+			L("-- require() falló: " .. tostring(res))
+		end
+	end
+	if getsenv then
+		local ok, e = pcall(getsenv, inst)
+		if ok and type(e) == "table" then
+			L("")
+			L("-- ═══════ 3) ENTORNO DEL SCRIPT (getsenv) ═══════")
+			L(ser(e, { maxDepth = 3, maxEntries = 200, fnDetail = true }))
+		end
+	end
+	if not (method or ""):find("constantes", 1, true) and getscriptclosure then
+		local ok, f = pcall(getscriptclosure, inst)
+		if ok and type(f) == "function" then
+			L("")
+			L("-- ═══════ 4) BYTECODE: función principal, upvalues, constantes ═══════")
+			L(X.describe(f, "principal", 0))
+		end
+	end
+	if getgc and getfenv then
+		L("")
+		L("-- ═══════ 5) FUNCIONES EN MEMORIA (getgc) QUE PERTENECEN A ESTE SCRIPT ═══════")
+		local ok, gc = pcall(getgc, true)
+		if ok and type(gc) == "table" then
+			local found, state = 0, { n = 0 }
+			for i = 1, #gc do
+				if i % 20000 == 0 then task.wait() end
+				local v = gc[i]
+				if type(v) == "function" then
+					local okf, fe = pcall(getfenv, v)
+					if okf and type(fe) == "table" then
+						local oks, sc = pcall(function() return fe.script end)
+						if oks and sc == inst then
+							found += 1
+							if found > 80 then L("-- … (más funciones omitidas)") break end
+							L(X.describe(v, "gc #" .. found, 0, state))
+						end
+					end
+				end
+			end
+			if found == 0 then L("-- (ninguna encontrada: el script no ha creado funciones en memoria)") end
+		end
+	end
+	local okC, ch = pcall(function() return inst:GetDescendants() end)
+	if okC and #ch > 0 then
+		L("")
+		L("-- ═══════ 6) HIJOS ═══════")
+		for i, d in ipairs(ch) do
+			if i > 60 then L("-- … +" .. (#ch - 60) .. " más") break end
+			L("-- " .. d.ClassName .. "  " .. d:GetFullName())
+		end
+	end
+	return table.concat(out, "\n")
+end
+
+X.dumpFullView = function(inst)
+	if not inst or not inst:IsA("LuaSourceContainer") then notify("Selecciona un script", "warn") return end
+	showTab("Script")
+	loadTok += 1
+	local my = loadTok
+	task.spawn(function()
+		X.showText("-- generando DUMP TOTAL de " .. inst:GetFullName() .. " … (puede tardar unos segundos)", "dump total", inst.Name)
+		local ok, res = pcall(dumpFull, inst)
+		if my ~= loadTok or not alive then return end
+		X.showText(ok and res or ("-- error en el dump: " .. tostring(res)), "DUMP TOTAL · " .. inst.Name, inst.Name .. "_DUMP")
+		curScript = inst
+	end)
+end
+
+local function targetScript()
+	return (selected and selected:IsA("LuaSourceContainer")) and selected or curScript
+end
+button(sBar, "Decompilar", function()
+	local t = targetScript()
+	if t then X.srcCache[t] = nil loadScript(t) else notify("Selecciona un script en el Explorer", "warn") end
+end, { TextSize = 13 })
+button(sBar, "Dump total", function()
+	local t = targetScript()
+	if t then X.dumpFullView(t) else notify("Selecciona un script en el Explorer", "warn") end
+end, { TextSize = 13 })
+button(sBar, "Valor módulo", function()
+	local t = (selected and selected:IsA("ModuleScript")) and selected or curScript
+	if not t or not t:IsA("ModuleScript") then notify("Selecciona un ModuleScript", "warn") return end
+	task.spawn(function()
+		local ok, res = withTimeout(function() return require(t) end, 8)
+		if not ok then notify("require falló: " .. tostring(res), "bad") return end
+		local txt = (res == nil) and "-- require() devolvió nil: el módulo no devuelve ningún valor\nreturn nil"
+			or ("-- tipo: " .. typeof(res) .. "\nreturn " .. ser(res, { maxDepth = 7, maxEntries = 500, maxNodes = 30000, fnDetail = true }))
+		X.showText(txt, "ModuleScript " .. t.Name .. " · require()", t.Name .. "_value")
+	end)
+end, { TextSize = 13 })
+button(sBar, "Constantes", function()
+	local t = targetScript()
+	if not t then notify("Selecciona un script", "warn") return end
+	task.spawn(function()
+		local d = dumpClosure(t, true)
+		if d then X.showText(d, t.ClassName .. " " .. t.Name .. " · bytecode", t.Name .. "_const")
+		else notify("Tu executor no tiene getscriptclosure / debug.getconstants", "bad") end
 	end)
 end, { TextSize = 13 })
 button(sBar, "Copiar", function()
@@ -1335,11 +2227,491 @@ end, { TextSize = 13 })
 button(sBar, "Guardar", function()
 	if lastSource == "" then notify("No hay código que guardar", "warn") return end
 	if not writefile then notify("Sin writefile", "bad") return end
-	if makefolder and isfolder and not isfolder("R4NDex") then makefolder("R4NDex") end
-	local path = "R4NDex/" .. lastName:gsub("[^%w_%-]", "_") .. ".lua"
+	ensureDir("R4NExplorer")
+	local path = "R4NExplorer/" .. safeName(lastName) .. ".lua"
 	local ok = pcall(writefile, path, lastSource)
 	notify(ok and ("Guardado: " .. path) or "Error al guardar", ok and "good" or "bad")
 end, { TextSize = 13 })
+
+end
+
+----------------------------------------------------------------
+-- Deep Search (búsqueda profunda): código de TODOS los scripts, constantes, nombres, valores y memoria
+----------------------------------------------------------------
+do
+local dc = addWindow("Deep", "🔎 Deep Search", 8, TOP, SW, math.min(500, vp.Y - TOP - 8), 340, 280)
+local DS = { case = false, pat = false, code = true, consts = true, names = true, values = false, gc = false, scope = nil }
+
+local qBox = new("TextBox", {
+	Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 0, 24), BackgroundColor3 = C.btn, TextColor3 = C.text,
+	PlaceholderText = "Buscar en código, constantes, nombres, valores y memoria…  (Enter)", PlaceholderColor3 = Color3.fromRGB(110, 110, 110),
+	Text = "", Font = FONT, TextSize = 14, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, BorderSizePixel = 0,
+}, dc)
+stroke(qBox, C.line)
+padding(qBox, 6, 0, 6, 0)
+local optBar, actBar = toolbar(dc, 32), toolbar(dc, 58)
+
+local function toggleBtn(parent, label, key)
+	local b
+	local function paint()
+		b.BackgroundColor3 = DS[key] and C.accent or C.btn
+		b:SetAttribute("base", b.BackgroundColor3)
+	end
+	b = button(parent, label, function() DS[key] = not DS[key] paint() end, { TextSize = 13 })
+	paint()
+	return b
+end
+toggleBtn(optBar, "Aa", "case")
+toggleBtn(optBar, "Patrón Lua", "pat")
+toggleBtn(optBar, "📄 Código", "code")
+toggleBtn(optBar, "🔑 Constantes", "consts")
+toggleBtn(optBar, "🏷 Nombres", "names")
+toggleBtn(optBar, "🔢 Valores", "values")
+toggleBtn(optBar, "🧠 GC", "gc")
+
+local prog = new("Frame", { Position = UDim2.fromOffset(4, 84), Size = UDim2.new(1, -8, 0, 4), BackgroundColor3 = C.line, BorderSizePixel = 0 }, dc)
+local progFill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.accent2, BorderSizePixel = 0 }, prog)
+local statLbl = text(dc, "Escribe algo y pulsa Enter / Buscar.", {
+	Position = UDim2.fromOffset(6, 90), Size = UDim2.new(1, -12, 0, 16), TextColor3 = C.dim, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd,
+})
+local resList = new("ScrollingFrame", {
+	Position = UDim2.fromOffset(4, 110), Size = UDim2.new(1, -8, 1, -114), BackgroundColor3 = C.bg, BorderSizePixel = 0,
+	ScrollBarThickness = 8, ScrollBarImageColor3 = C.scroll, CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+}, dc)
+stroke(resList, C.line)
+
+local RH, MAXRES = 34, 3000
+local results, pool = {}, {}
+local openResult
+local KIND_ICON = { code = "📄", const = "🔑", name = "🏷", value = "🔢", gc = "🧠" }
+
+local function makeResRow()
+	local b = new("TextButton", { Size = UDim2.new(1, -2, 0, RH), BackgroundColor3 = C.sel, BackgroundTransparency = 1, Text = "", AutoButtonColor = false, BorderSizePixel = 0, Visible = false }, resList)
+	local ic = text(b, "", { Size = UDim2.fromOffset(20, 18), Position = UDim2.fromOffset(2, 1), TextSize = 14, TextXAlignment = Enum.TextXAlignment.Center })
+	local title = text(b, "", { Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -28, 0, 17), RichText = true, TextTruncate = Enum.TextTruncate.AtEnd, TextSize = 14 })
+	local snip = text(b, "", { Position = UDim2.fromOffset(24, 17), Size = UDim2.new(1, -28, 0, 16), RichText = true, Font = MONO, TextSize = 12, TextColor3 = C.dim, TextTruncate = Enum.TextTruncate.AtEnd })
+	local r = { frame = b, icon = ic, title = title, snip = snip, item = nil }
+	b.MouseEnter:Connect(function() b.BackgroundTransparency = 0.55 end)
+	b.MouseLeave:Connect(function() b.BackgroundTransparency = 1 end)
+	b.Activated:Connect(function() if r.item then openResult(r.item) end end)
+	return r
+end
+local function rrender()
+	local first = math.max(1, math.floor(resList.CanvasPosition.Y / RH) + 1)
+	local need = math.ceil(resList.AbsoluteSize.Y / RH) + 2
+	resList.CanvasSize = UDim2.fromOffset(0, #results * RH)
+	for i = 1, math.max(need, #pool) do
+		local it = results[first + i - 1]
+		if i <= need and it then
+			local r = pool[i]
+			if not r then r = makeResRow() pool[i] = r end
+			r.item = it
+			r.frame.Position = UDim2.fromOffset(0, (first + i - 2) * RH)
+			r.icon.Text = KIND_ICON[it.kind] or "▫"
+			r.title.Text = it.title
+			r.snip.Text = it.snip or ""
+			r.frame.Visible = true
+		elseif pool[i] then
+			pool[i].frame.Visible = false
+			pool[i].item = nil
+		end
+	end
+end
+connect(resList:GetPropertyChangedSignal("CanvasPosition"), rrender)
+connect(resList:GetPropertyChangedSignal("AbsoluteSize"), rrender)
+
+-- coincidencias -------------------------------------------------------------------------------------
+local function makeMatcher(q, case, pat)
+	if pat then
+		local p = case and q or X.ciPattern(q)
+		local ok, e = pcall(string.find, "", p)
+		if not ok then return nil, e end
+		return {
+			quick = function(src) local ok2, a = pcall(string.find, src, p) return ok2 and a ~= nil end,
+			find = function(s) local ok2, a, b = pcall(string.find, s, p) if ok2 then return a, b end end,
+		}
+	end
+	if case then
+		return { quick = function(src) return src:find(q, 1, true) ~= nil end, find = function(s) return s:find(q, 1, true) end }
+	end
+	local lq = q:lower()
+	return {
+		quick = function(src) return src:lower():find(lq, 1, true) ~= nil end,
+		find = function(s) return s:lower():find(lq, 1, true) end,
+	}
+end
+
+local function clean(s) return (s:gsub("[%c]", " ")) end
+local function hlSnippet(line, s, e)
+	line = clean(line)
+	local a = math.max(1, s - 40)
+	local b = math.min(#line, e + 90)
+	local pre, mid, post = line:sub(a, s - 1), line:sub(s, e), line:sub(e + 1, b)
+	return (a > 1 and "…" or "") .. X.escRT(pre) .. '<font color="#ffc600"><b>' .. X.escRT(mid) .. "</b></font>" .. X.escRT(post)
+end
+local function pathOf(inst)
+	local ok, p = pcall(function() return inst.Parent and inst.Parent:GetFullName() or "nil" end)
+	return ok and p or "?"
+end
+local function titleFor(inst, extra)
+	return X.escRT(inst.Name) .. '  <font color="#7a7a7a">' .. X.escRT(pathOf(inst)) .. "</font>" .. (extra or "")
+end
+
+local function scriptConstants(inst)
+	local c = X.constCache[inst]
+	if c then return c end
+	local list, uniq = {}, {}
+	local getc = getscriptclosure or getscriptfunction
+	if getc and debug and debug.getconstants then
+		local ok, f = pcall(getc, inst)
+		if ok and type(f) == "function" then
+			local seen, n = {}, 0
+			local function walk(fn, d)
+				if d > 6 or seen[fn] or n > 5000 then return end
+				seen[fn] = true
+				local okc, cs = pcall(debug.getconstants, fn)
+				if okc and type(cs) == "table" then
+					for _, v in pairs(cs) do
+						if type(v) == "string" and #v > 0 and #v < 400 and not uniq[v] then
+							uniq[v] = true
+							n += 1
+							list[#list + 1] = v
+						end
+					end
+				end
+				if debug.getprotos then
+					local okp, ps = pcall(debug.getprotos, fn)
+					if okp and type(ps) == "table" then
+						for _, p in ipairs(ps) do
+							if type(p) == "function" then walk(p, d + 1) end
+						end
+					end
+				end
+			end
+			walk(f, 0)
+		end
+	end
+	X.constCache[inst] = list
+	return list
+end
+
+local VP = {
+	TextLabel = { "Text" }, TextButton = { "Text" }, TextBox = { "Text", "PlaceholderText" }, Sound = { "SoundId" },
+	ImageLabel = { "Image" }, ImageButton = { "Image" }, MeshPart = { "MeshId", "TextureID" }, Decal = { "Texture" },
+	Texture = { "Texture" }, ProximityPrompt = { "ActionText", "ObjectText" }, Animation = { "AnimationId" },
+	Tool = { "ToolTip" }, SpecialMesh = { "MeshId", "TextureId" }, Shirt = { "ShirtTemplate" }, Pants = { "PantsTemplate" },
+}
+local function instValues(inst)
+	local out = {}
+	local props = VP[inst.ClassName]
+	if props then
+		for _, p in ipairs(props) do
+			local ok, v = pcall(function() return inst[p] end)
+			if ok and type(v) == "string" and v ~= "" then out[#out + 1] = { p, v } end
+		end
+	end
+	if inst:IsA("ValueBase") then
+		local ok, v = pcall(function() return inst.Value end)
+		if ok and v ~= nil then out[#out + 1] = { "Value", tostring(v) } end
+	end
+	local okA, at = pcall(function() return inst:GetAttributes() end)
+	if okA and type(at) == "table" then
+		for k, v in pairs(at) do out[#out + 1] = { "@" .. k, tostring(v) } end
+	end
+	return out
+end
+
+local function inScope(inst)
+	local sc = DS.scope
+	if not sc then return true end
+	local ok, r = pcall(function() return inst == sc or inst:IsDescendantOf(sc) end)
+	return ok and r
+end
+
+-- motor de búsqueda -------------------------------------------------------------------------------
+local tok, running = 0, false
+local function setProg(p, msg)
+	progFill.Size = UDim2.fromScale(math.clamp(p, 0, 1), 1)
+	if msg then statLbl.Text = msg end
+end
+local function scriptList()
+	local t = {}
+	for _, s in ipairs(X.collectScripts(true)) do
+		if inScope(s) and not X.skip(s) then t[#t + 1] = s end
+	end
+	return t
+end
+
+local function runSearch(q)
+	if q == "" then statLbl.Text = "Escribe algo para buscar." return end
+	if not (DS.code or DS.consts or DS.names or DS.values or DS.gc) then statLbl.Text = "Activa al menos un tipo de búsqueda." return end
+	local m, err = makeMatcher(q, DS.case, DS.pat)
+	if not m then statLbl.Text = "Patrón inválido: " .. tostring(err) return end
+	tok += 1
+	local my = tok
+	running = true
+	table.clear(results)
+	resList.CanvasPosition = Vector2.zero
+	rrender()
+	local t0, slice = os.clock(), os.clock()
+	local hitScripts, scanned, failed = 0, 0, 0
+	local function alive2() return my == tok and alive end
+	local function add(it)
+		if #results >= MAXRES then return false end
+		results[#results + 1] = it
+		return true
+	end
+	local function tick(force)
+		if force or os.clock() - slice > 0.012 then
+			rrender()
+			task.wait()
+			slice = os.clock()
+		end
+	end
+	local opts = { case = DS.case, pat = DS.pat }
+
+	if DS.code or DS.consts then
+		local scripts = scriptList()
+		for si, inst in ipairs(scripts) do
+			if not alive2() then return end
+			if si % 3 == 0 or si == #scripts then setProg((si / #scripts) * 0.7, ("Escaneando scripts %d/%d · %s · %d resultados"):format(si, #scripts, inst.Name, #results)) end
+			local found = 0
+			local method
+			if DS.code then
+				local src, mth = X.fetch(inst, false)
+				method = mth
+				scanned += 1
+				if not src then failed += 1
+				elseif m.quick(src) then
+					local ln, pos = 1, 1
+					while true do
+						local e = src:find("\n", pos, true)
+						local line = src:sub(pos, e and e - 1 or #src)
+						if #line > 0 then
+							local a, b = m.find(line)
+							if a then
+								found += 1
+								if found <= 40 then
+									add({ kind = "code", inst = inst, line = ln, find = q, opts = opts,
+										title = titleFor(inst, ' <font color="#ffa050">:' .. ln .. "</font>"), snip = hlSnippet(line, a, b) })
+								end
+							end
+						end
+						if not e or #results >= MAXRES then break end
+						pos = e + 1
+						ln += 1
+					end
+				end
+			end
+			if DS.consts and (found == 0 or (method or ""):find("constantes", 1, true)) then
+				for _, c in ipairs(scriptConstants(inst)) do
+					local a, b = m.find(c)
+					if a then
+						found += 1
+						if found <= 40 then
+							add({ kind = "const", inst = inst, find = c, opts = { case = true }, title = titleFor(inst, ' <font color="#70c0ff">const</font>'), snip = hlSnippet(c, a, b) })
+						end
+					end
+				end
+			end
+			if found > 0 then hitScripts += 1 end
+			if found > 40 then
+				add({ kind = "code", inst = inst, line = 1, find = q, opts = opts, title = titleFor(inst, ' <font color="#ffa050">+' .. (found - 40) .. " más</font>"), snip = "(abre el script para ver todas)" })
+			end
+			tick()
+			if #results >= MAXRES then break end
+		end
+	end
+
+	if (DS.names or DS.values) and alive2() and #results < MAXRES then
+		setProg(0.72, "Escaneando instancias…")
+		local pool2 = {}
+		pcall(function()
+			if DS.scope then
+				pool2[1] = DS.scope
+				for _, d in ipairs(DS.scope:GetDescendants()) do pool2[#pool2 + 1] = d end
+			else
+				for _, d in ipairs(game:GetDescendants()) do pool2[#pool2 + 1] = d end
+				if getnilinstances then
+					for _, d in ipairs(getnilinstances()) do
+						pool2[#pool2 + 1] = d
+						for _, dd in ipairs(d:GetDescendants()) do pool2[#pool2 + 1] = dd end
+					end
+				end
+			end
+		end)
+		for i, inst in ipairs(pool2) do
+			if i % 2000 == 0 then
+				if not alive2() then return end
+				setProg(0.72 + 0.2 * (i / #pool2), ("Instancias %d/%d · %d resultados"):format(i, #pool2, #results))
+				tick(true)
+			end
+			if DS.names then
+				local a, b = m.find(inst.Name)
+				if a then
+					add({ kind = "name", inst = inst, title = X.escRT(inst.Name) .. ' <font color="#7a7a7a">[' .. inst.ClassName .. "]</font>", snip = X.escRT(pathOf(inst)) })
+				end
+			end
+			if DS.values then
+				for _, kv in ipairs(instValues(inst)) do
+					local a, b = m.find(kv[2])
+					if a then
+						add({ kind = "value", inst = inst, title = titleFor(inst, ' <font color="#70c0ff">' .. X.escRT(kv[1]) .. "</font>"), snip = hlSnippet(kv[2], a, b) })
+					end
+				end
+			end
+			if #results >= MAXRES then break end
+		end
+	end
+
+	if DS.gc and getgc and alive2() and #results < MAXRES then
+		setProg(0.93, "Escaneando memoria (getgc)…")
+		local ok, gc = pcall(getgc, true)
+		local gcHits = 0
+		if ok and type(gc) == "table" then
+			for i = 1, #gc do
+				if i % 4000 == 0 then
+					if not alive2() then return end
+					setProg(0.93 + 0.06 * (i / #gc), ("Memoria %d/%d · %d resultados"):format(i, #gc, #results))
+					tick(true)
+				end
+				local v = gc[i]
+				local tv = type(v)
+				if tv == "table" then
+					local n = 0
+					pcall(function()
+						for k, val in next, v do
+							n += 1
+							if n > 200 then break end
+							local label, txt
+							if type(k) == "string" and #k < 300 and m.find(k) then label, txt = "clave", k
+							elseif type(val) == "string" and #val < 300 and m.find(val) then label, txt = "valor [" .. tostring(k) .. "]", val end
+							if label then
+								gcHits += 1
+								local a, b = m.find(txt)
+								add({ kind = "gc", value = v, title = "tabla · " .. X.escRT(label), snip = hlSnippet(txt, a or 1, b or #txt) })
+								break
+							end
+						end
+					end)
+				elseif tv == "function" then
+					local info = X.fnInfo(v)
+					local hit, txt = nil, nil
+					if info.name ~= "" and m.find(info.name) then hit, txt = "nombre", info.name end
+					if not hit and info.kind == "Lua" then
+						for _, c in ipairs(X.constList(v, 80)) do
+							local plain = c:gsub('^"', ""):gsub('"$', "")
+							if m.find(plain) then hit, txt = "constante", plain break end
+						end
+					end
+					if hit then
+						gcHits += 1
+						local a, b = m.find(txt)
+						add({ kind = "gc", value = v, title = "función · " .. hit .. (info.name ~= "" and (" «" .. X.escRT(info.name) .. "»") or ""), snip = hlSnippet(txt, a or 1, b or #txt) })
+					end
+				end
+				if gcHits >= 400 or #results >= MAXRES then break end
+			end
+		end
+	end
+
+	running = false
+	rrender()
+	setProg(1)
+	statLbl.Text = ("%d resultados%s · %d scripts con coincidencias · %d escaneados (%d sin código) · %.1fs"):format(
+		#results, #results >= MAXRES and "+" or "", hitScripts, scanned, failed, os.clock() - t0)
+end
+
+openResult = function(it)
+	if it.kind == "code" or it.kind == "const" then
+		pcall(function() X.selectAndReveal(it.inst) end)
+		X.openScriptAt(it.inst, it.line, it.find, it.opts)
+	elseif it.kind == "gc" then
+		task.spawn(function()
+			showTab("Script")
+			X.showText("-- Resultado de memoria (getgc)\nreturn " .. ser(it.value, { maxDepth = 4, maxEntries = 300, fnDetail = true }), "GC", "gc_result")
+		end)
+	elseif it.inst then
+		pcall(function() X.selectAndReveal(it.inst) end)
+		showTab("Properties")
+	end
+end
+
+-- botones -----------------------------------------------------------------------------------------
+local scopeBtn
+local function paintScope()
+	scopeBtn.Text = DS.scope and ("Ámbito: " .. DS.scope.Name) or "Ámbito: todo"
+	scopeBtn.BackgroundColor3 = DS.scope and C.accent or C.btn
+	scopeBtn:SetAttribute("base", scopeBtn.BackgroundColor3)
+end
+button(actBar, "🔎 Buscar", function() runSearch(qBox.Text) end, { TextSize = 13 })
+button(actBar, "⏹ Parar", function()
+	tok += 1
+	running = false
+	rrender()
+	statLbl.Text = ("Detenido · %d resultados"):format(#results)
+end, { TextSize = 13 })
+scopeBtn = button(actBar, "Ámbito: todo", function()
+	if DS.scope then DS.scope = nil
+	elseif selected then DS.scope = selected
+	else notify("Selecciona una instancia en el Explorer para limitar la búsqueda", "warn") end
+	paintScope()
+end, { TextSize = 13 })
+button(actBar, "⚙ Indexar scripts", function()
+	if running then return end
+	tok += 1
+	local my = tok
+	running = true
+	task.spawn(function()
+		local scripts = scriptList()
+		local ok, fail = 0, 0
+		for i, s in ipairs(scripts) do
+			if my ~= tok or not alive then return end
+			if i % 3 == 0 then setProg(i / #scripts, ("Indexando %d/%d · %s"):format(i, #scripts, s.Name)) end
+			local src = X.fetch(s, false)
+			if src then ok += 1 else fail += 1 end
+			if i % 5 == 0 then task.wait() end
+		end
+		running = false
+		setProg(1, ("Indexados %d scripts (%d sin código). Las búsquedas siguientes serán instantáneas."):format(ok, fail))
+	end)
+end, { TextSize = 13 })
+button(actBar, "🗑 Caché", function()
+	for k in pairs(X.srcCache) do X.srcCache[k] = nil end
+	for k in pairs(X.constCache) do X.constCache[k] = nil end
+	statLbl.Text = "Caché de código vaciada."
+end, { TextSize = 13 })
+button(actBar, "📋 Copiar", function()
+	if #results == 0 then notify("No hay resultados", "warn") return end
+	local t = {}
+	for _, it in ipairs(results) do
+		local nm = it.inst and getPath(it.inst) or "gc"
+		t[#t + 1] = ("[%s] %s%s  %s"):format(it.kind, nm, it.line and (":" .. it.line) or "", (it.snip or ""):gsub("<[^>]+>", ""))
+	end
+	copyN(table.concat(t, "\n"), #results .. " resultados copiados")
+end, { TextSize = 13 })
+button(actBar, "💾 Guardar", function()
+	if #results == 0 or not writefile then notify("Sin resultados o sin writefile", "warn") return end
+	local t = {}
+	for _, it in ipairs(results) do
+		t[#t + 1] = ("[%s] %s%s  %s"):format(it.kind, it.inst and getPath(it.inst) or "gc", it.line and (":" .. it.line) or "", (it.snip or ""):gsub("<[^>]+>", ""))
+	end
+	pcall(makefolder, "R4NExplorer")
+	local ok = pcall(writefile, "R4NExplorer/busqueda.txt", table.concat(t, "\n"))
+	notify(ok and "Guardado: R4NExplorer/busqueda.txt" or "Error al guardar", ok and "good" or "bad")
+end, { TextSize = 13 })
+
+qBox.FocusLost:Connect(function(enter)
+	if enter then runSearch(qBox.Text) end
+end)
+
+X.openDeep = function(inst, query, autorun)
+	DS.scope = inst
+	paintScope()
+	showTab("Deep")
+	if query then qBox.Text = query end
+	if autorun and query and query ~= "" then task.spawn(runSearch, query) else qBox:CaptureFocus() end
+end
 end
 
 ----------------------------------------------------------------
@@ -1525,8 +2897,8 @@ end)
 tool("💾 Guardar árbol en archivo", function()
 	if not need() then return end
 	if not writefile then notify("Sin writefile", "bad") return end
-	if makefolder and isfolder and not isfolder("R4NDex") then makefolder("R4NDex") end
-	local p = "R4NDex/tree_" .. selected.Name:gsub("[^%w_%-]", "_") .. ".txt"
+	if makefolder and isfolder and not isfolder("R4NExplorer") then makefolder("R4NExplorer") end
+	local p = "R4NExplorer/tree_" .. selected.Name:gsub("[^%w_%-]", "_") .. ".txt"
 	local ok = pcall(writefile, p, treeText(selected, 12, 20000))
 	notify(ok and ("Guardado: " .. p) or "Error al guardar", ok and "good" or "bad")
 end)
@@ -1576,6 +2948,42 @@ tool("🔎 Ver compatibilidad del executor", function()
 	showTab("Console")
 end)
 
+tool("🔎 Deep Search  (Ctrl+Shift+F)", function() X.openDeep(nil) end)
+tool("💾 Volcar TODOS los scripts a archivos (respeta blacklist)", function() X.dumpAll(nil) end)
+tool("🛡 Alternar blacklist de scripts de Roblox", function() X.setBlacklist(not X.cfg.blacklist) end)
+tool("📊 Estadísticas de scripts", function()
+	local all = X.collectScripts(true)
+	local n = { LocalScript = 0, ModuleScript = 0, Script = 0 }
+	local hidden, nilp = 0, 0
+	for _, s in ipairs(all) do
+		if X.isDefault(s) then hidden += 1 end
+		if n[s.ClassName] then n[s.ClassName] += 1 end
+		if s.Parent == nil then nilp += 1 end
+	end
+	cLine(("— Scripts —\nTotal: %d\nLocalScript: %d · ModuleScript: %d · Script: %d\nSin padre (nil): %d\nScripts de Roblox detectados: %d (blacklist %s)"):format(
+		#all, n.LocalScript, n.ModuleScript, n.Script, nilp, hidden, X.cfg.blacklist and "ON" or "OFF"), Enum.MessageType.MessageInfo)
+	showTab("Console")
+end)
+tool("📋 Copiar rutas de todos los scripts", function()
+	local t = {}
+	for _, s in ipairs(X.collectScripts(true)) do
+		if not X.skip(s) then t[#t + 1] = s.ClassName .. "  " .. getPath(s) end
+	end
+	table.sort(t)
+	copyN(table.concat(t, "\n"), #t .. " rutas copiadas")
+end)
+tool("🧹 Vaciar cachés (código / constantes / blacklist)", function()
+	for k in pairs(X.srcCache) do X.srcCache[k] = nil end
+	for k in pairs(X.constCache) do X.constCache[k] = nil end
+	X.clearBlCache()
+	X.scriptCache.t = -1e9
+	notify("Cachés vaciadas", "good")
+end)
+tool("🧭 Leyenda de iconos", function()
+	cLine(X.iconLegend(), Enum.MessageType.MessageInfo)
+	showTab("Console")
+end)
+
 ----------------------------------------------------------------
 -- Bucle principal, atajos, barra de ventanas y cierre
 ----------------------------------------------------------------
@@ -1599,6 +3007,14 @@ end)
 connect(UIS.InputBegan, function(i, gp)
 	if not gp and i.KeyCode == Enum.KeyCode.RightShift then
 		gui.Enabled = not gui.Enabled
+		return
+	end
+	if not gp and i.KeyCode == Enum.KeyCode.F and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then
+		if UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift) then
+			X.openDeep(nil)
+		elseif windows.Script.frame.Visible then
+			X.focusFind()
+		end
 		return
 	end
 	if isPress(i) then
@@ -1631,28 +3047,28 @@ local function destroy()
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 	pcall(function() hl:Destroy() end)
 	pcall(function() gui:Destroy() end)
-	env.R4NDex = nil
+	env.R4NExplorer = nil
 end
-env.R4NDex = { Destroy = destroy }
+env.R4NExplorer = { Destroy = destroy }
 
 -- barra de ventanas (arriba, movible): muestra/oculta cada ventana
-local LW = math.min(500, vp.X - 16)
+local LW = math.min(720, vp.X - 16)
 local launch = new("Frame", {
 	Size = UDim2.fromOffset(LW, 24), Position = UDim2.fromOffset(math.floor((vp.X - LW) / 2), 4),
 	BackgroundColor3 = C.title, BorderSizePixel = 0, ZIndex = 100000,
 }, gui)
 stroke(launch, C.line)
-local lh = text(launch, "◆ R4N", { Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(50, 24), Font = FONTB, TextColor3 = C.accent2, ZIndex = 100001 })
+local lh = text(launch, "◆ R4N Explorer", { Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(112, 24), Font = FONTB, TextColor3 = C.accent2, ZIndex = 100001 })
 makeDraggable(lh, function() return launch.Position end, function(sp, dx, dy)
 	launch.Position = UDim2.new(sp.X.Scale, sp.X.Offset + dx, sp.Y.Scale, sp.Y.Offset + dy)
 end)
 local lstrip = new("ScrollingFrame", {
-	Position = UDim2.fromOffset(60, 2), Size = UDim2.new(1, -64, 1, -4), BackgroundTransparency = 1, BorderSizePixel = 0,
+	Position = UDim2.fromOffset(124, 2), Size = UDim2.new(1, -128, 1, -4), BackgroundTransparency = 1, BorderSizePixel = 0,
 	ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X, ZIndex = 100001,
 }, launch)
 hlist(lstrip, 3)
-for _, key in ipairs({ "Explorer", "Properties", "Script", "Remotes", "Console", "Tools" }) do
-	local label = key == "Script" and "Script Viewer" or key
+for _, key in ipairs({ "Explorer", "Properties", "Script", "Deep", "Remotes", "Console", "Tools" }) do
+	local label = key == "Script" and "Script Viewer" or key == "Deep" and "🔎 Deep Search" or key
 	button(lstrip, label, function()
 		local f = windows[key].frame
 		if f.Visible then f.Visible = false else showTab(key) end
@@ -1665,4 +3081,5 @@ showTab("Explorer")
 showTab("Properties")
 rebuild()
 render()
-notify("R4N Dex listo · RightShift para ocultar · click derecho = menú", "good")
+X.splash.run()
+notify("R4N Explorer listo · RightShift = ocultar · Ctrl+Shift+F = Deep Search · click derecho = menú", "good")
